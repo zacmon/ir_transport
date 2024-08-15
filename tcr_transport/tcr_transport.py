@@ -113,8 +113,8 @@ class TCRTransport():
                 'Both beta_cols and alpha_cols must not be None'
             )
         elif beta_cols is not None and alpha_cols is not None:
-            seq_cols = self.tcr_cols[::2]
-            v_cols = self.tcr_cols[1::2]
+            seq_cols = beta_cols[:1] + alpha_cols[:1]
+            v_cols = beta_cols[1:] + alpha_cols[1:]
             old_cols = beta_cols + alpha_cols
             self.tcr_cols = ['cdr3b', 'vb', 'cdr3a', 'va']
         elif beta_cols is None:
@@ -160,7 +160,7 @@ class TCRTransport():
             self.max_distance, self.neighbor_radius
         )
 
-    def do_randomization_test(
+    def compute_significance(
         self,
         trial_count: int = 100,
         seed = None
@@ -391,7 +391,7 @@ class TCRTransport():
                 if not isinstance(df_samp_sub, pl.DataFrame):
                     return df_samp_sub
             except Exception as e:
-                if 'did not converge' in str(e):
+                if 'did not find a breakpoint' in str(e):
                     logging.info(f'{e} Terminating finding clusters.')
                     break
                 else:
@@ -404,8 +404,10 @@ class TCRTransport():
                 )))
             num_clusters += 1
 
-        return self.df_sample.join(
+        self.df_sample =  self.df_sample.join(
             df_cluster, on=self.common_cols, how='left'
         ).drop(
             pl.col('^*right$')
         )
+
+        return self.df_sample
