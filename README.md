@@ -1,6 +1,18 @@
 # TCRTransport
 This is a refactoring and updating of [transport](https://github.com/matsengrp/transport/tree/main) from the Matsen lab.
 
+## Installation
+1. Clone the repository.
+
+```bash
+git clone https://github.com/zacmon/transport_tcr.git
+```
+
+2. Pip install the package
+```bash
+pip install .
+```
+
 ## Usage
 Consider two TCR repertoires stored at `FILE1` and `FILE2`, where the first repertoire is to be used as the reference repertoire.
 I.e., we want to see which sequences from the second repertoire are distinct from the first.
