@@ -24,6 +24,8 @@ class SegmentedLinearModel(object):
         """
         Fit a segmented linear model using the algorithm by Muggeo [1]_.
 
+        Function is originally based off https://datascience.stackexchange.com/a/32833.
+
         Parameters
         ----------
         x : numpy.ndarray of numpy.float64
@@ -52,12 +54,11 @@ class SegmentedLinearModel(object):
 
         breakpoints = np.sort(np.array(breakpoints))
         num_breakpoints = len(breakpoints)
-        dt = np.min(np.diff(x))
         ones = np.ones_like(x)
 
         err = np.inf
 
-        for i in range(maxiter):
+        for _ in range(maxiter):
             x_diff_bkpts = x - breakpoints[:, None]
             max0_vals = np.maximum(x_diff_bkpts, 0)
             indicator_vals = (x_diff_bkpts > 0).astype(np.float64)
@@ -65,7 +66,6 @@ class SegmentedLinearModel(object):
 
             sol =  lstsq(coeff_mat.T, y, rcond=None)[0]
 
-            # Parameters identification:
             intercept, slope = sol[0:2]
             max0_params = sol[2:2 + num_breakpoints]
             indicator_params = sol[2 + num_breakpoints:]

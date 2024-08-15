@@ -132,6 +132,8 @@ def square_indices_to_condensed_idx(
     Map indices from a symmetric square matrix to a condensed vectorform, i.e., the upper
     right triangle of the matrix.
 
+    Formula from https://stackoverflow.com/a/36867493.
+
     Parameters
     ----------
     rows : numpy.ndarray of numpy.integer
@@ -163,6 +165,8 @@ def condensed_idx_to_square_indices(
     """
     Map indices from a vectorform of the upper right triangular matrix to its
     symmetric squareform representation.
+
+    Formulas from https://stackoverflow.com/a/36867493.
 
     Parameters
     ----------
