@@ -11,6 +11,8 @@ from tcr_transport.utils import *
 
 logging.getLogger().setLevel(logging.INFO)
 
+SUPPORTED_SPECIES = {'human'}
+
 def get_mass_distribution(
     df: pl.DataFrame,
     cols: Sequence[str],
@@ -88,12 +90,20 @@ def split_datasets(
 class TCRTransport():
     def __init__(
         self,
+        species: str,
         distribution_type: str = 'uniform',
         lambd: float = 0.01,
         max_distance: int = 200,
         neighbor_radius: int = 48,
         seed = None,
     ) -> None:
+        if species not in SUPPORTED_SPECIES:
+            supported_species_str = f'{SUPPORTED_SPECIES}'[1:-1]
+            raise ValueError(
+                f'{species} is not a valid option for species. species must be '
+                f'one of {supported_species_str}.'
+            )
+        self.species = species
         self.distribution_type = distribution_type
         self.lambd = lambd
         self.max_distance = max_distance
@@ -128,12 +138,15 @@ class TCRTransport():
 
         df = load_data(data, seq_cols, v_cols, **kwargs).rename(
             {col: rcol for col, rcol in zip(old_cols, self.tcr_cols)}
+        ).sort(
+            # Sort for consistency between runs.
+            self.tcr_cols
         )
 
         if reference:
             self.df_ref = df
         else:
-            self.df_sample = df
+            self.df_samp = df
 
         self.common_cols = self.tcr_cols + ['recomb_multiplicity']
 
@@ -141,22 +154,22 @@ class TCRTransport():
         self,
     ) -> None:
         self.sample_distance_vectorform = compute_distance_vectorform(
-            self.df_sample[self.tcr_cols].to_numpy()
+            self.df_samp[self.tcr_cols].to_numpy()
         )
         self.mass_ref = get_mass_distribution(self.df_ref, self.tcr_cols)
-        self.mass_samp = get_mass_distribution(self.df_sample, self.tcr_cols)
-        distance_matrix = compute_distance_vectorform(
+        self.mass_samp = get_mass_distribution(self.df_samp, self.tcr_cols)
+        self.distance_matrix = compute_distance_vectorform(
             self.df_ref[self.tcr_cols].to_numpy(),
-            self.df_sample[self.tcr_cols].to_numpy(),
+            self.df_samp[self.tcr_cols].to_numpy(),
             dtype=np.float64
-        ).reshape(self.df_ref.shape[0], self.df_sample.shape[0]) / self.max_distance
+        ).reshape(self.df_ref.shape[0], self.df_samp.shape[0]) / self.max_distance
 
         self.effort_matrix = compute_effort_matrix(
-            self.mass_ref, self.mass_samp, distance_matrix, self.lambd
+            self.mass_ref, self.mass_samp, self.distance_matrix, self.lambd
         )
 
-        self.df_sample = compute_enrichments(
-            self.df_sample, self.effort_matrix, self.sample_distance_vectorform,
+        self.df_samp = compute_enrichments(
+            self.df_samp, self.effort_matrix, self.sample_distance_vectorform,
             self.max_distance, self.neighbor_radius
         )
 
@@ -171,7 +184,7 @@ class TCRTransport():
             rng = np.random.default_rng(seed)
 
         df_full = pl.concat((
-            self.df_ref.select(self.common_cols), self.df_sample.select(self.common_cols)
+            self.df_ref.select(self.common_cols), self.df_samp.select(self.common_cols)
         ))
 
         randomized_scores = []
@@ -203,7 +216,7 @@ class TCRTransport():
 
             # Keep only those TCRs which appeared in the true second repertoire.
             randomized_scores.append(
-                self.df_sample.join(
+                self.df_samp.join(
                     df_samp_trial,
                     on=self.common_cols,
                     suffix='_trial'
@@ -213,11 +226,11 @@ class TCRTransport():
         df_rand = pl.concat(randomized_scores)
 
         num_tcrs_seen = df_rand.unique(self.common_cols).shape[0]
-        if num_tcrs_seen != self.df_sample.shape[0]:
-            num_missing = self.df_sample.shape[0] - num_tcrs_seen
+        if num_tcrs_seen != self.df_samp.shape[0]:
+            num_missing = self.df_samp.shape[0] - num_tcrs_seen
             raise RuntimeError(
                 f'Not all TCRs were seen over all trials (missing {num_missing} from '
-                f'{self.df_sample.shape[0]} total). Increase the trial_count.'
+                f'{self.df_samp.shape[0]} total). Increase the trial_count.'
             )
 
         min_sample_size = df_rand.select(
@@ -257,111 +270,136 @@ class TCRTransport():
         distance_vectorform: Optional[NDArray[np.int16]] = None,
         step: int = 5,
         init_breakpoint: float = 75,
+        return_intermediates: bool = False,
         debug: bool = False,
         **kwargs
     ) -> pl.DataFrame:
         if df is None:
-            df = self.df_sample
+            df = self.df_samp
             distance_vectorform = self.sample_distance_vectorform
 
-        max_score_tcr_index = df['enrichment'].arg_max()
-        max_score = df[max_score_tcr_index]['enrichment'].item(0)
-
-        enrichment_mask = df.select(
-                pl.col('enrichment') > pl.col('enrichment').quantile(0.5)
-        )['enrichment'].to_numpy()
-
-        radii = np.arange(0, self.max_distance, step)
-
-        neighborhood_mask = np.zeros(df.shape[0], dtype=bool)
-        neighborhood_mask[max_score_tcr_index] = True
+        max_score_tcr_idx = df['enrichment'].arg_max()
+        max_score = df[max_score_tcr_idx]['enrichment'].item(0)
 
         vectorform_idxs = square_indices_to_condensed_idx(
-            np.zeros(df.shape[0], dtype=np.int32) + max_score_tcr_index,
+            np.zeros(df.shape[0], dtype=np.int32) + max_score_tcr_idx,
             np.arange(df.shape[0], dtype=np.int32),
             df.shape[0]
         )
 
         distance_vec = distance_vectorform[vectorform_idxs]
-        distance_vec = np.insert(distance_vec, max_score_tcr_index, 0)
+        distance_vec = np.insert(distance_vec, max_score_tcr_idx, 0)
 
-        mean_enrichments = np.zeros_like(radii, dtype=np.float64)
-        annulus_enrichments = np.zeros_like(radii, dtype=np.float64)
-        cluster_sizes = np.zeros_like(radii, dtype=np.int32)
+        radii = np.arange(0, self.max_distance + step, step)
+        # Determine which TCRs belong to which annulus.
+        annulus_searchsort = np.searchsorted(radii, distance_vec, 'left')
 
-        for idx, radius in enumerate(radii):
-            neighbor_idxs = np.where(distance_vec <= radius)
-            if neighbor_idxs:
-                neighborhood_mask[neighbor_idxs] = True
+        df = df.with_columns(
+            enrichment_above_median=pl.col('enrichment') > pl.col('enrichment').quantile(0.5),
+            dist_to_max_score=distance_vec,
+            # Assign TCRs to annuluses.
+            annulus_idx=annulus_searchsort
+        ).filter(
+            # Keep upper 50% enrichment TCRs only.
+            (pl.col('enrichment_above_median'))
+            # Remove TCRs beyond the max annulus radius.
+            & (pl.col('annulus_idx') < len(radii) - 1)
+        ).with_columns(
+            annulus_radius=pl.lit(radii).get(pl.col('annulus_idx'))
+        )
 
-            annulus_mask = (
-                (distance_vec < radius + step)
-                & (distance_vec >= radius)
-                & enrichment_mask
+        # Obtain the mean annulus enrichments for breakpoint inference.
+        tmp = df.group_by(
+            ['annulus_radius']
+        ).agg(
+            sum_enrichment=pl.col('enrichment').sum(),
+            mean_annulus_enrichment=pl.col('enrichment').mean(),
+            num_in_annulus=pl.len()
+        ).sort(
+            'annulus_radius'
+        ).with_columns(
+            num_in_cluster=pl.col('num_in_annulus').cum_sum(),
+            mean_neighborhood_enrichment=(
+                pl.col('sum_enrichment').cum_sum() / pl.col('num_in_annulus').cum_sum()
             )
-            full_mask = neighborhood_mask & enrichment_mask
+        )
 
-            mean_neighborhood_enrichment = df.filter(
-                full_mask
-            )['enrichment'].mean()
-
-            mean_annulus_enrichment = df.filter(
-                annulus_mask
-            )['enrichment'].mean()
-
-            if mean_annulus_enrichment is None:
-                mean_annulus_enrichment = np.nan
-
-            mean_enrichments[idx] = mean_neighborhood_enrichment
-            annulus_enrichments[idx] = mean_annulus_enrichment
-            cluster_sizes[idx] = np.count_nonzero(full_mask)
-
-        slm = SegmentedLinearModel()
-        slm.fit(radii, annulus_enrichments, np.array([init_breakpoint]), **kwargs)
+        slm = SegmentedLinearModel(
+            tmp['annulus_radius'], tmp['mean_annulus_enrichment'],
+        )
+        slm.fit(init_breakpoint, **kwargs)
 
         if slm.max0_params[0] < 1e-10:
             if debug:
-                return pl.DataFrame({
-                    'radii': radii,
-                    'mean_enrichments': mean_enrichments,
-                    'annulus_enrichments': annulus_enrichments,
-                    'cluster_sizes': cluster_sizes
-                }), slm
+                return tmp, slm
             raise RuntimeError(
-                'Segmented linear did not find a breakpoint.'
+                'Segmented linear model did not find a breakpoint.'
             )
 
         cluster_radius = slm.breakpoints[0]
 
-        return df.filter(
-            pl.lit(distance_vec <= cluster_radius)
+        df = df.filter(
+            (pl.col('dist_to_max_score') <= cluster_radius )
+        ).drop(
+            ('annulus_radius', 'enrichment_above_median', 'dist_to_max_score')
         )
+
+        if return_intermediates:
+            return df, tmp, slm
+        return df
 
     def create_clusters(
         self,
         max_cluster_count: int = 10,
         step: int = 5,
         init_breakpoint: float = 75,
+        return_intermediates: bool = False,
         debug: bool = False,
         **kwargs
     ) -> pl.DataFrame:
-        # Build the initial cluster from the complete sample repertoire.
-        df_cluster = self.cluster(
-            step=step, init_breakpoint=init_breakpoint, debug=debug, **kwargs,
-        )
+        tmp_dfs = []
+        slms = []
 
-        if not isinstance(df_cluster, pl.DataFrame):
-            return df_cluster
+        # Build the initial cluster from the complete sample repertoire.
+        try:
+            res = self.cluster(
+                step=step, init_breakpoint=init_breakpoint, debug=debug,
+                return_intermediates=return_intermediates, **kwargs,
+            )
+            if debug:
+                if not isinstance(res, pl.DataFrame):
+                    logging.info(
+                        'Segmented linear model did not find a breakpoint. Returning '
+                        'the DataFrame used to fit the model as well as the model object.'
+                    )
+                    return res
+        except Exception as e:
+            if 'did not find a breakpoint' in str(e):
+                logging.info(f'{e} Terminating finding clusters.')
+            else:
+                raise e
+            return
         else:
+            if return_intermediates:
+                df_cluster, tmp_df, slm = res
+                tmp_dfs.append(tmp_df)
+                slms.append(slm)
+            else:
+                df_cluster = res
+
             df_cluster = df_cluster.with_columns(
-            transport_cluster=pl.lit(0)
-        )
+                transport_cluster=pl.lit(0)
+            )
+
         num_clusters = 1
 
         while num_clusters <= max_cluster_count:
-            df_samp_sub = self.df_sample.join(
+            # Obtain the subrepertoire which excludes all the previously
+            # clustered TCRs.
+            df_samp_sub = self.df_samp.join(
                 df_cluster, on=self.common_cols, how='anti'
             )
+
             mass_samp_sub = get_mass_distribution(df_samp_sub, self.tcr_cols)
             samp_sub_dist_vectorform = compute_distance_vectorform(
                 df_samp_sub[self.tcr_cols].to_numpy()
@@ -383,13 +421,17 @@ class TCRTransport():
             )
 
             try:
-                df_samp_sub = self.cluster(
+                res = self.cluster(
                     df_samp_sub, samp_sub_dist_vectorform, step, init_breakpoint,
-                    debug=debug, **kwargs
+                    return_intermediates, debug, **kwargs
                 )
-
-                if not isinstance(df_samp_sub, pl.DataFrame):
-                    return df_samp_sub
+                if debug:
+                    if not isinstance(res, pl.DataFrame):
+                        logging.info(
+                            'Segmented linear model did not find a breakpoint. Returning '
+                            'the DataFrame used to fit the model as well as the model object.'
+                        )
+                        return res
             except Exception as e:
                 if 'did not find a breakpoint' in str(e):
                     logging.info(f'{e} Terminating finding clusters.')
@@ -397,17 +439,27 @@ class TCRTransport():
                 else:
                     raise e
             else:
+                if return_intermediates:
+                    df_samp_sub, tmp_df, slm = res
+                    tmp_dfs.append(res[1])
+                    slms.append(res[2])
+                else:
+                    df_samp_sub = res
+
                 df_cluster = pl.concat((
                     df_cluster,
                     df_samp_sub.with_columns(
                     transport_cluster=pl.lit(num_clusters)
                 )))
+
             num_clusters += 1
 
-        self.df_sample =  self.df_sample.join(
+        self.df_samp =  self.df_samp.join(
             df_cluster, on=self.common_cols, how='left'
         ).drop(
             pl.col('^*right$')
         )
 
-        return self.df_sample
+        if return_intermediates:
+            return self.df_samp, tmp_dfs, slms
+        return self.df_samp

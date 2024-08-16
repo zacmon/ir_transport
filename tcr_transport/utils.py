@@ -100,8 +100,10 @@ def load_data(
 def compute_distance_vectorform(
     seqs: NDArray[str],
     seqs_comp: Optional[NDArray[str]] = None,
+    species: str = 'human',
     dtype: str | type = np.int16,
 ) -> NDArray[np.uint16]:
+    # TODO Add support for mice.
     if seqs.shape[1] == 2:
         dist_func = f'tcrdist_gene_'
     else:
