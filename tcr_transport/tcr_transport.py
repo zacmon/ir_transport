@@ -178,19 +178,53 @@ class TCRTransport():
         trial_count: int = 100,
         seed = None
     ):
+        if 'enrichment' not in self.df_samp.columns:
+            raise RuntimeError(
+                'No enrichment values were computed for the original sample '
+                'repertoire, so no significance can be computed. Please run '
+                'compute_sample_enrichment() using the TCRTransport object '
+                'and then try running this function again.'
+            )
+
         if seed is not None:
             rng = self.rng
         else:
             rng = np.random.default_rng(seed)
 
+        # TODO Change to weighted sampling instead of expanding fully?
+        # TODO Avoid concatenating both DataFrames and pull samples directly
+        #      from self.df_samp and self.df_rep?
+        # Expand the DataFrame to the full size of the repertoires to sample TCRs
+        # individually.
         df_full = pl.concat((
             self.df_ref.select(self.common_cols), self.df_samp.select(self.common_cols)
-        ))
+        )).group_by(
+            self.tcr_cols
+        ).agg(
+            pl.ones(pl.col('recomb_multiplicity').sum(), dtype=pl.UInt32)
+        ).explode(
+            'ones'
+        ).drop(
+            'ones'
+        )
+        num_ref = self.df_ref['recomb_multiplicity'].sum()
 
         randomized_scores = []
 
         for trial in range(trial_count):
-            df_ref_trial, df_samp_trial = split_datasets(df_full, self.df_ref.shape[0], rng)
+            df_ref_trial, df_samp_trial = split_datasets(df_full, num_ref, rng)
+
+            df_ref_trial = df_ref_trial.group_by(
+                self.tcr_cols
+            ).agg(
+                recomb_multiplicity=pl.len()
+            )
+
+            df_samp_trial = df_samp_trial.group_by(
+                self.tcr_cols
+            ).agg(
+                recomb_multiplicity=pl.len()
+            )
 
             mass_ref_trial = get_mass_distribution(df_ref_trial, self.tcr_cols)
             mass_samp_trial = get_mass_distribution(df_samp_trial, self.tcr_cols)
@@ -276,7 +310,23 @@ class TCRTransport():
     ) -> pl.DataFrame:
         if df is None:
             df = self.df_samp
+            if not hasattr(self, 'sample_distance_vectorform'):
+                raise RuntimeError(
+                    'No enrichment values were computed for the original sample '
+                    'repertoire, so no clusters can be created. Please run '
+                    'compute_sample_enrichment() using the TCRTransport object '
+                    'and then try running this function again.'
+                )
+
             distance_vectorform = self.sample_distance_vectorform
+
+        if 'enrichment' not in df.columns:
+            raise RuntimeError(
+                'No enrichment values were computed for the given input'
+                'repertoire DataFrame, so a cluster cannot be create. Please run '
+                'compute the enrichment for the clones and then try running this '
+                'function again.'
+            )
 
         max_score_tcr_idx = df['enrichment'].arg_max()
         max_score = df[max_score_tcr_idx]['enrichment'].item(0)
@@ -357,6 +407,14 @@ class TCRTransport():
         debug: bool = False,
         **kwargs
     ) -> pl.DataFrame:
+        if 'enrichment' not in self.df_samp.columns:
+            raise RuntimeError(
+                'No enrichment values were computed for the original sample '
+                'repertoire, so no clusters can be created. Please run '
+                'compute_sample_enrichment() using the TCRTransport object '
+                'and then try running this function again.'
+            )
+
         tmp_dfs = []
         slms = []
 
