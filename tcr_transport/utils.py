@@ -23,12 +23,12 @@ def load_data(
         point to a valid file to be read. Otherwise, data could be an existing
         DataFrame or two-dimensional data in many forms.
     seq_cols : str or sequence of str
-        String(s) which points to the alpha and/or beta CDR3 amino acid columns in the DataFrame.
+        String(s) which points to the alpha and/or beta CDR3 amino acid sequences.
     v_cols : str or sequence or str
         String(s) which points to the alpha and/or beta V genes.
     collapse : str, optional
-        If 'gene', the V genes have the allele information removed. If 'subfamily',
-        the gene information is removed from the V annotation.
+        If 'allele', the V genes have the allele information removed. If 'subfamily',
+        the gene subfamily information is removed from the V annotation.
     **kwargs : dict of {str : any}
         Keyword arguments to polars.read_csv if data is a string or keyword arguments
         to polars.DataFrame if data is not a string.
@@ -39,9 +39,9 @@ def load_data(
         A DataFrame containing the TCR repertoire annotations deduplicated at the
         level of recombinations.
     """
-    if collapse is not None and collapse not in {'gene', 'subfamily'}:
+    if collapse is not None and collapse not in {'allele', 'subfamily'}:
         raise ValueError(
-            'collapse must be \'gene\' or \'subfamily\'.'
+            'collapse must be \'allele\' or \'subfamily\'.'
         )
     if isinstance(data, str):
         df = pl.read_csv(data, **kwargs)
@@ -189,5 +189,8 @@ def condensed_idx_to_square_indices(
     """
     row_idxs = np.ceil(0.5 * (2 * n - 1 - (4 * (n**2 - n - 2 * idxs) - 7)**0.5) - 1)
     row_idxs_p1 = row_idxs + 1
-    col_idxs = n + idxs - (row_idxs_p1 * (n - 1 - row_idxs_p1) + (row_idxs_p1 * (row_idxs_p1 + 1)) // 2)
+    col_idxs = n + idxs - (
+        row_idxs_p1 * (n - 1 - row_idxs_p1)
+        + (row_idxs_p1 * (row_idxs_p1 + 1)) // 2
+    )
     return row_idxs.astype(dtype), col_idxs.astype(dtype)

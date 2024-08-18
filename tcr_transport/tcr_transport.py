@@ -141,7 +141,7 @@ class TCRTransport():
         ).sort(
             # Sort for consistency between runs.
             self.tcr_cols
-        )
+        ).with_row_index()
 
         if reference:
             self.df_ref = df
@@ -191,22 +191,29 @@ class TCRTransport():
         else:
             rng = np.random.default_rng(seed)
 
+        #ref_distance_vectorform = compute_distance_vectorform(
+        #    self.df_ref[self.tcr_cols].to_numpy()
+        #)
+
         # TODO Change to weighted sampling instead of expanding fully?
         # TODO Avoid concatenating both DataFrames and pull samples directly
         #      from self.df_samp and self.df_rep?
-        # Expand the DataFrame to the full size of the repertoires to sample TCRs
-        # individually.
         df_full = pl.concat((
-            self.df_ref.select(self.common_cols), self.df_samp.select(self.common_cols)
-        )).group_by(
-            self.tcr_cols
-        ).agg(
-            pl.ones(pl.col('recomb_multiplicity').sum(), dtype=pl.UInt32)
-        ).explode(
-            'ones'
-        ).drop(
-            'ones'
-        )
+            # Expand the DataFrame to the full size of the repertoires to sample
+            # TCRs individually, labeling which TCRs came from which DataFrame.
+            df.select(
+                self.common_cols
+            ).with_row_index().group_by(
+                self.common_cols
+            ).agg(
+                sample=func(pl.col('recomb_multiplicity').sum(), dtype=pl.Int8),
+                index=pl.col('index').first()
+            ).explode(
+                'sample'
+            )
+            for df, func in zip((self.df_ref, self.df_samp), (pl.zeros, pl.ones))
+        ))
+
         num_ref = self.df_ref['recomb_multiplicity'].sum()
 
         randomized_scores = []
@@ -229,6 +236,7 @@ class TCRTransport():
             mass_ref_trial = get_mass_distribution(df_ref_trial, self.tcr_cols)
             mass_samp_trial = get_mass_distribution(df_samp_trial, self.tcr_cols)
 
+            # TODO Use precomputed distance matrix and vectorforms.
             samp_trial_dist_vectorform = compute_distance_vectorform(
                 df_samp_trial[self.tcr_cols].to_numpy()
             )
@@ -310,6 +318,7 @@ class TCRTransport():
     ) -> pl.DataFrame:
         if df is None:
             df = self.df_samp
+
             if not hasattr(self, 'sample_distance_vectorform'):
                 raise RuntimeError(
                     'No enrichment values were computed for the original sample '
@@ -317,28 +326,27 @@ class TCRTransport():
                     'compute_sample_enrichment() using the TCRTransport object '
                     'and then try running this function again.'
                 )
-
             distance_vectorform = self.sample_distance_vectorform
 
         if 'enrichment' not in df.columns:
             raise RuntimeError(
                 'No enrichment values were computed for the given input'
-                'repertoire DataFrame, so a cluster cannot be create. Please run '
+                'repertoire DataFrame, so a cluster cannot be create. Please '
                 'compute the enrichment for the clones and then try running this '
                 'function again.'
             )
 
-        max_score_tcr_idx = df['enrichment'].arg_max()
-        max_score = df[max_score_tcr_idx]['enrichment'].item(0)
+        max_score_arg_max = df['enrichment'].arg_max()
+        max_score = df[max_score_arg_max]['enrichment'].item(0)
 
         vectorform_idxs = square_indices_to_condensed_idx(
-            np.zeros(df.shape[0], dtype=np.int32) + max_score_tcr_idx,
+            np.zeros(df.shape[0], dtype=np.int32) + max_score_arg_max,
             np.arange(df.shape[0], dtype=np.int32),
             df.shape[0]
         )
 
         distance_vec = distance_vectorform[vectorform_idxs]
-        distance_vec = np.insert(distance_vec, max_score_tcr_idx, 0)
+        distance_vec = np.insert(distance_vec, max_score_arg_max, 0)
 
         radii = np.arange(0, self.max_distance + step, step)
         # Determine which TCRs belong to which annulus.
@@ -391,7 +399,7 @@ class TCRTransport():
         df = df.filter(
             (pl.col('dist_to_max_score') <= cluster_radius )
         ).drop(
-            ('annulus_radius', 'enrichment_above_median', 'dist_to_max_score')
+            ('annulus_idx', 'annulus_radius', 'enrichment_above_median', 'dist_to_max_score')
         )
 
         if return_intermediates:
@@ -450,6 +458,7 @@ class TCRTransport():
             )
 
         num_clusters = 1
+        len_df_samp = len(self.df_samp)
 
         while num_clusters <= max_cluster_count:
             # Obtain the subrepertoire which excludes all the previously
@@ -457,30 +466,32 @@ class TCRTransport():
             df_samp_sub = self.df_samp.join(
                 df_cluster, on=self.common_cols, how='anti'
             )
+            len_samp_sub = len(df_samp_sub)
 
             mass_samp_sub = get_mass_distribution(df_samp_sub, self.tcr_cols)
-            samp_sub_dist_vectorform = compute_distance_vectorform(
-                df_samp_sub[self.tcr_cols].to_numpy()
-            )
 
-            distance_matrix = compute_distance_vectorform(
-                self.df_ref[self.tcr_cols].to_numpy(),
-                df_samp_sub[self.tcr_cols].to_numpy(),
-                dtype=np.float64
-            ).reshape(self.df_ref.shape[0], df_samp_sub[self.tcr_cols].shape[0]) / self.max_distance
+            # Get the subrepertoire's distance vectorform.
+            samp_sub_idxs = df_samp_sub['index'].to_numpy()
+            rows_sub, cols_sub = np.mask_indices(len_samp_sub, np.triu)
+            rows, cols = samp_sub_idxs[rows_sub], samp_sub_idxs[cols_sub]
+            vf_idxs = square_indices_to_condensed_idx(rows, cols, len_df_samp)
+            distance_vectorform = self.sample_distance_vectorform[vf_idxs]
+
+            # Get the subrepertoire's distance matrix.
+            distance_matrix = self.distance_matrix[:, df_samp_sub['index']]
 
             effort_matrix = compute_effort_matrix(
                 self.mass_ref, mass_samp_sub, distance_matrix, self.lambd
             )
 
             df_samp_sub = compute_enrichments(
-                df_samp_sub, effort_matrix, samp_sub_dist_vectorform,
+                df_samp_sub, effort_matrix, distance_vectorform,
                 self.max_distance, self.neighbor_radius
             )
 
             try:
                 res = self.cluster(
-                    df_samp_sub, samp_sub_dist_vectorform, step, init_breakpoint,
+                    df_samp_sub, distance_vectorform, step, init_breakpoint,
                     return_intermediates, debug, **kwargs
                 )
                 if debug:
