@@ -25,19 +25,28 @@ class SegmentedLinearModel(object):
         """
         x = np.asarray(x)
         y = np.asarray(y)
+
+        if len(x) != len(y):
+            raise RuntimeError(
+                'x and y must have the same length.'
+            )
+
         mask_finite = np.isfinite(x) & np.isfinite(y)
         self.x, self.y = x[mask_finite], y[mask_finite]
+        self.x_min = x.min()
+        self.x_max = x.max()
 
     def fit(
         self,
         breakpoints: Sequence[float],
         maxiter: int = 10,
-        tol: float = 1e-2,
-    ):
+        tol: float = 1e-8,
+    ) -> Tuple[np.float64, NDArray[np.float64]]:
         """
         Fit a segmented linear model using the algorithm by Muggeo [1]_.
 
-        Function is originally based off https://datascience.stackexchange.com/a/32833.
+        Function is originally based off https://datascience.stackexchange.com/a/32833,
+        and the segmented R package is at https://cran.r-project.org/web/packages/segmented/.
 
         Parameters
         ----------
@@ -58,26 +67,37 @@ class SegmentedLinearModel(object):
             The inferred intercept.
         slope : float
             The inferred slope.
-        breakpoints : numpy.ndarray of np.float64
+        breakpoints : numpy.ndarray of numpy.float64
             The inferred breakpoints
-        max0_params : numpy.ndarray of np.float64
+        max0_params : numpy.ndarray of numpy.float64
             The difference-in-slopes parameters for the different breakpoints.
-        indicator_params : numpy.ndarray of float
-            The parameters associated with the indicator function. This is used
-            for inference, not evaluating ordinate values. It is included for
-            completeness.
+        indicator_params : numpy.ndarray of np.float64
+            The parameters associated with updated the estimation of the
+            breakpoints. They are used for assessing convergence and statistics
+            of the breakpoints, not evaluating ordinate values.
 
         References
         ----------
         .. [1] Muggeo V (2003) "Estimating regression models with unknown break-points."
                Statist. Med 22(19), 3055-3071, https://doi.org/10.1002/sim.1545
         """
-        if not hasattr(breakpoints, 'len'):
+        if not hasattr(breakpoints, '__len__'):
             breakpoints = [breakpoints]
         breakpoints = np.sort(np.array(breakpoints))
+
+        if breakpoints.min() <= self.x_min:
+            raise RuntimeError(
+                'The minimum breakpoint is at or below the minimum x. Ensure that '
+                'the minimum initial guess is in (x_min, x_max).'
+            )
+        if breakpoints.max() >= self.x_max:
+            raise RuntimeError(
+                'The maximum breakpoint is at or beyond the maximum x. Ensure that'
+                'the maximum initial guess is in (x_min, x_max).'
+            )
+
         num_breakpoints = len(breakpoints)
         ones = np.ones_like(self.x)
-
         previous_delta = 0
 
         for _ in range(maxiter):
@@ -98,13 +118,30 @@ class SegmentedLinearModel(object):
             if np.allclose(np.abs(previous_delta), np.abs(delta)):
                 break
 
-            loss = np.max(np.abs(delta) / breakpoints)
+            loss = np.max(np.abs(indicator_params))
             # Change in breakpoint is within precision tolerance of convergence.
             if loss < tol:
                 break
 
             breakpoints = breakpoints - delta
             previous_delta = delta
+
+        if breakpoints.min() < self.x_min:
+            raise RuntimeError(
+                'The minimum inferred breakpoint is smaller than the given x. '
+                'Is the model over- or underparameterized? Are there better values '
+                'for the initial breakpoint guesses? Inspect y vs. x to get '
+                'a better sense of how many breakpoints there might be and at what '
+                'values the breakpoints should be initialized.'
+            )
+        if breakpoints.max() > self.x_max:
+            raise RuntimeError(
+                'The maximum inferred breakpoint is larger than the given x. '
+                'Is the model over- or underparameterized? Are there better values '
+                'for the initial breakpoint guesses? Inspect y vs. x to get '
+                'a better sense of how many breakpoints there might be and at what '
+                'values the breakpoints should be initialized.'
+            )
 
         self.breakpoints = breakpoints
         self.max0_params = max0_params
@@ -117,7 +154,7 @@ class SegmentedLinearModel(object):
     def eval(
         self,
         x: Sequence[float]
-    ):
+    ) -> NDArray[np.float64]:
         """
         Compute an estimate of y for the given x using the fitted parameters.
 

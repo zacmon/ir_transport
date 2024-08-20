@@ -24,17 +24,30 @@ def get_mass_distribution(
     Parameters
     ----------
     df : polars.DataFrame
-        A DataFrame containing the TCR recombinations. It is expected that this
-        DataFrame was produced by the .It must have a
-        'recomb_multiplicity' column.
+        A DataFrame containing the immune receptor sequences. It is expected
+        that this DataFrame was produced by the utils.load_data function.
+        It must have a 'recomb_multiplicity' column.
+    cols : sequence of str
+        The columns used to define immune receptor clones.
+    distribution_type : str, default 'uniform'
+        How the mass distribution is contructions.
+        'uniform': each unique clone is weighted by its multiplicity.
+
+    Returns
+    -------
+    numpy.ndarray of numpy.float64
+        The mass distirbution of the clones in the DataFrame.
     """
     if distribution_type == 'inverse_to_v_gene':
         pass
     elif distribution_type == 'uniform':
         return df.with_columns(
-            tcr=pl.concat_str(cols)
+            clone=pl.concat_str(cols)
         ).with_columns(
-            mass=pl.col('recomb_multiplicity').sum().over('tcr') / pl.col('recomb_multiplicity').sum()
+            mass=(
+                pl.col('recomb_multiplicity').sum().over('clone')
+                / pl.col('recomb_multiplicity').sum()
+            )
         )['mass'].to_numpy()
     else:
         raise RuntimeError(
@@ -43,12 +56,38 @@ def get_mass_distribution(
         )
 
 def compute_effort_matrix(
-    mass_reference: NDArray[np.float64],
-    mass_sample: NDArray[np.float64],
+    mass_1: NDArray[np.float64],
+    mass_2: NDArray[np.float64],
     distance_matrix: NDArray[np.float64],
-    lambd: float = 0.01,
+    reg: float = 0.01,
+    **kwargs: Dict[str, Any],
 ) -> NDArray[np.float64]:
-    ot_mat = ot.sinkhorn(mass_reference, mass_sample, distance_matrix, lambd)
+    """
+    Infer the optimal transport map and compute the effort matrix.
+
+    Parameters
+    ----------
+    mass_1 : numpy.ndarray of numpy.float64
+        A mass distribution whose domain is ordered with the rows of the distance
+        matrix.
+    mass_2 : numpy.ndarray of numpy.float64
+        A mass distribution whose doamin is ordered with the columns of the
+        distance matrix.
+    distance_matrix : numpy.ndarray of float64
+        A matrix of distances computed between all-to-all comparisons of the
+        domains of the two distributions.
+    reg : float, default 0.01
+        The regularization weight for the Sinkhorn solver.
+    **kwargs
+        Keyword arguments to ot.sinkhorn.
+
+    Returns
+    -------
+    numpy.ndarray of numpy.float64
+        The effort matrix, which is the elementwise product of the distance matrix
+        and the optimal transport map.
+    """
+    ot_mat = ot.sinkhorn(mass_1, mass_2, distance_matrix, reg)
     return distance_matrix * ot_mat
 
 def compute_enrichments(
@@ -58,31 +97,95 @@ def compute_enrichments(
     max_distance: float = 200,
     neighbor_radius: int = 48,
     axis: int = 0,
+    no_neighbors: bool = False,
 ):
+    """
+    Compute the loneliness for the entries in the DataFrame with or without neighbors.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        A DataFrame containing the immune receptor sequences.
+    effort_matrix : numpy.ndarray of numpy.float64
+        The elementwise product of the optimal transport map and the distance
+        matrix.
+    distance_vectorform : numpy.ndarray of numpy.int16
+        The distances among all sequences in the given DataFrame.
+    max_distance : float, default 200
+        The maximum distance which was used for scaling when inferring the optimal
+        transport map.
+    neighbor_radius : int, default 48
+        The inclusive distance at which a sequence is considered another sequence's
+        neighbor.
+    axis : int, default 0
+        The axis along which the effort matrix will be summed to compute a sequence's
+        loneliness. If axis = 0, then the effort matrix along axis 1 should have the
+        same length as the given DataFrame and vice versa if axis = 1.
+    no_neighbors : bool, default False
+        The enrichment score will be each sequence's loneliness without adding
+        contributions from neighbors.
+
+    Returns
+    -------
+    df : polars.DataFrame
+        The input DataFrame with columns 'enrichment' and 'num_neighbors', giving
+        the enrichment score and the number of neighbors, respectively, for that
+        sequence.
+    """
     efforts = max_distance * df['recomb_multiplicity'].sum() * effort_matrix.sum(axis)
 
     len_df = df.shape[0]
 
-    mask = np.zeros((len_df,) * 2, dtype=bool)
-    np.fill_diagonal(mask, True)
+    df = df.with_columns(
+        enrichment=efforts,
+        num_neighbors=pl.lit(1)
+    )
+
+    if no_neighbors:
+        return df
 
     neighbor_idxs = np.where(distance_vectorform <= neighbor_radius)
     if neighbor_idxs:
+        # TODO Use a sparse representation and not a dense mask array?
         rows, cols = condensed_idx_to_square_indices(neighbor_idxs[0], len_df)
-        mask[rows, cols] = mask[rows, cols] = True
+        mask = np.zeros((len_df,) * 2, dtype=bool)
+        np.fill_diagonal(mask, True)
+        mask[rows, cols] = mask[cols, rows] = True
 
-    return df.with_columns(
-        enrichment=efforts @ mask,
-        num_neighbors=mask.sum(0)
-    )
+        df = df.with_columns(
+            enrichment=efforts @ mask,
+            num_neighbors=mask.sum(0)
+        )
+
+    return df
 
 def split_datasets(
     df: pl.DataFrame,
     n: int,
-    rng = None,
+    seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None,
 ) -> Tuple[pl.DataFrame]:
-    if rng is None:
+    """
+    Split a DataFrame by sampling without replacement.
+
+    Parameters
+    ----------
+    df : polars.DataFrame
+        A DataFrame.
+    n : int
+        The size of one partition of the DataFrame.
+    seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
+        The seed for the random number generator.
+
+    Returns
+    -------
+    tuple of polars.DataFrame
+        Two DataFrames that were obtained by sampling the given DataFrame without
+        replacement.
+    """
+    if seed is None:
         rng = np.random.default_rng()
+    else:
+        rng = np.random.default_rng(seed)
 
     permutation = rng.permutation(df.shape[0])
     return  df[permutation[:n]], df[permutation[n:]]
@@ -93,10 +196,34 @@ class TCRTransport():
         species: str,
         distribution_type: str = 'uniform',
         lambd: float = 0.01,
-        max_distance: int = 200,
+        max_distance: float = 200,
         neighbor_radius: int = 48,
-        seed = None,
+        seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None,
     ) -> None:
+        """
+        Initialize a TCRTransport object.
+
+        Parameters
+        ----------
+        species : str
+            This specifies which database should be used when computing TCRdist
+            among sequences.
+            Presently the only acceptable option is 'human'.
+        distribution_type : str, default 'uniform'
+            How the mass distributions of a repertoire should be computed.
+        lambd : float, 0.01
+            The regularization weight for the Sinkhorn solver.
+        max_distance : float, default 200
+            The maximum distance for inferring clusters of enriched sequences.
+            Additionally, this value is used to scale the distance matrix when
+            inferring an optimal transport map.
+        neighbor_radius : int, default 48
+            The inclusive distance at which a sequence is considered another sequence's
+            neighbor when computing enrichments.
+        seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
+            The seed for the random number generator. This is used when computing
+            the significance of enrichments.
+        """
         if species not in SUPPORTED_SPECIES:
             supported_species_str = f'{SUPPORTED_SPECIES}'[1:-1]
             raise ValueError(
@@ -116,8 +243,35 @@ class TCRTransport():
         beta_cols: Optional[Sequence[str]] = None,
         alpha_cols: Optional[Sequence[str]] = None,
         reference: bool = False,
-        **kwargs
+        **kwargs: Dict[str, Any],
     ) -> None:
+        """
+        Preprocess a repertoire and specify whether if it used as a reference.
+
+        Parameters
+        ----------
+        data : str or dict of {str : any} or Sequence or numpy.ndarray or polars.Series or pandas.DataFrame or polars.DataFrame
+            A variable which points to the repertoire data. If a string, data must
+            point to a valid file to be read. Otherwise, data could be an existing
+            DataFrame or two-dimensional data in many forms.
+        beta_cols : sequence of str, optional
+            The columns pointing to the CDR3 and V allele/gene of a VDJ sequence.
+            The string pointing to the CDR3 must come first and the V allele/gene
+            column must come second.
+        alpha_cols : sequence of str, optional
+            The columns pointing to the CDR3 and V allele/gene of a VJ sequence.
+            The string pointing to the CDR3 must come first and the V allele/gene
+            column must come second.
+        reference : bool, default False
+            Specifies if the repertoire being added will be used as the reference,
+            i.e., its sequences will not be checked to see if they're enriched.
+        **kwargs
+            Keyword arguments to utils.load_data.
+
+        Returns
+        -------
+        None
+        """
         if beta_cols is None and alpha_cols is None:
             raise RuntimeError(
                 'Both beta_cols and alpha_cols must not be None'
@@ -152,7 +306,26 @@ class TCRTransport():
 
     def compute_sample_enrichment(
         self,
+        no_neighbors: bool = False,
     ) -> None:
+        """
+        Compute the enrichments of sequences in the non-reference repertoire.
+
+        The TCRdist among sequences in the sample are computed, the mass
+        distirbutions of each sample are computed, and the TCRdist matrix
+        among all sequences in the reference and sample repertoires are computed.
+        Then the effort matrix is computed by inferring an optimal transport map.
+        Finally, the enrichments are computed.
+
+        Parameters
+        ----------
+        no_neighbors : bool, default False
+            If True, do not incorporate neighbors when computing enrichments.
+
+        Returns
+        -------
+        None
+        """
         self.sample_distance_vectorform = compute_distance_vectorform(
             self.df_samp[self.tcr_cols].to_numpy()
         )
@@ -170,14 +343,38 @@ class TCRTransport():
 
         self.df_samp = compute_enrichments(
             self.df_samp, self.effort_matrix, self.sample_distance_vectorform,
-            self.max_distance, self.neighbor_radius
+            self.max_distance, self.neighbor_radius, no_neighbors=no_neighbors
         )
 
     def compute_significance(
         self,
         trial_count: int = 100,
-        seed = None
-    ):
+        seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None,
+    ) -> pl.DataFrame:
+        """
+        Compute the significance of the calculated enrichment using a randomization test.
+
+        In a single randomization trial, the input repertoires are concatened
+        and randomly partitioned into the original sizes of the repertoires.
+        Enrichments are calculated for sequences in the shuffled repertoire
+        which is the same size as the original sample repertoire, and p values
+        are estimated.
+
+        Paramaters
+        ----------
+        trial_count : int, default 100
+            The number of times the data will be randomized in order to compute
+            significance.
+        seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
+            The seed for the random number generator. If None, the object's rng
+            attribute will be used.
+
+        Returns
+        -------
+        df_rand : polars.DataFrame
+            The sample repertoire DataFrame annotated with statistics from the
+            randomization test.
+        """
         if 'enrichment' not in self.df_samp.columns:
             raise RuntimeError(
                 'No enrichment values were computed for the original sample '
@@ -231,7 +428,7 @@ class TCRTransport():
                 self.tcr_cols
             ).agg(
                 recomb_multiplicity=pl.len()
-            )
+            ).with_row_index()
 
             mass_ref_trial = get_mass_distribution(df_ref_trial, self.tcr_cols)
             mass_samp_trial = get_mass_distribution(df_samp_trial, self.tcr_cols)
@@ -291,17 +488,19 @@ class TCRTransport():
             # Downsample all TCRs to the same number.
             pl.col('idx') < min_sample_size
         ).group_by(
-            pl.exclude('enrichment_trial', 'num_neighbors_trial', 'idx')
+            pl.exclude('^*trial$', 'idx')
         ).agg(
             scores=pl.col('enrichment_trial').sort(),
             z_score=((pl.col('enrichment') - pl.col('enrichment_trial').mean())
-                     / pl.col('enrichment_trial').std()),
+                     / pl.col('enrichment_trial').std()).first(),
             ecdf=pl.int_range(0, pl.len() + 1) / pl.len(),
             search_sort=pl.col('enrichment_trial').sort().search_sorted(pl.col('enrichment')).first()
         ).with_columns(
             p_value=1 - pl.col('ecdf').list.get(pl.col('search_sort'))
         ).drop(
             ['ecdf', 'search_sort']
+        ).sort(
+            'index'
         )
 
         return df_rand
@@ -314,8 +513,51 @@ class TCRTransport():
         init_breakpoint: float = 75,
         return_intermediates: bool = False,
         debug: bool = False,
-        **kwargs
-    ) -> pl.DataFrame:
+        **kwargs: Dict[str, Any],
+    ) -> pl.DataFrame | Tuple[pl.DataFrame, SegmentedLinearModel]:
+        """
+        Obtain the cluster of sequences around the most enriched sequence using
+        segmented linear regression.
+
+        Parameters
+        ----------
+        df : polars.DataFrame
+            A DataFrame containing sequences and their enrichments.
+        distance_vectorform : numpy.ndarray of numpy.int16
+            The upper triangle of the TCRdist matrix of the sequences in the
+            given DataFrame represented as a one-dimensional vector.
+        step : int, default 5
+            The width of the annuluses around the most enriched sequence.
+        init_breakpoint: int, default 75
+            The initial guess at which there is a breakpoint in the mean enrichment
+            in an annulus vs. annulus radius.
+        return_intermediates : bool, default False
+            Return the DataFrame of the cluster around the most enriched sequence
+            as well as the DataFrame containing the annulus enrichments and the
+            SegmentedLinearModel object used to infer the breakpoint.
+        debug : bool, default False
+            Return the DataFrame containing the annulus enrichments and the
+            SegmentedLinearModel object if a segmented linear regression
+            doesn't fit the data well.
+        **kwargs : dict of { str : any }
+            Keyword arguments to SegmentedLinearModel.fit().
+
+        Returns
+        -------
+        df : polars.DataFrame
+            The DataFrame containing the sequences which clustered around
+            the most enriched sequence present in df.
+        tmp : polars.DataFrame
+            The DataFrame containing the measurements of the mean annulus enrichment
+            for each annulus as well as the number of sequences in each annulus.
+            return_intermediates = True will always return this. debug = True will
+            return this if the segmented linear model is a poor fit.
+        slm : SegmentedLinearModel
+            The SegmentedLinearModel object used to fit the breakpoint, giving
+            the radius of a cluster. return_intermediates = True will always
+            return this. debug = True will return this if the segmented linear
+            model is a poor fit.
+        """
         if df is None:
             df = self.df_samp
 
@@ -414,7 +656,51 @@ class TCRTransport():
         return_intermediates: bool = False,
         debug: bool = False,
         **kwargs
-    ) -> pl.DataFrame:
+    ) -> pl.DataFrame | Tuple[pl.DataFrame, List[pl.DataFrame], List[SegmentedLinearModel]]:
+        """
+        Create clusters around each consecutive unclustered but most enriched sequence
+        in the sample repertoire dataset.
+
+        Parameters
+        ----------
+        max_cluster_count : int, default 10
+            The number of clusters to form.
+        step : int, default 5
+            The width of the annuluses around the most enriched sequence. This
+            is used to collect measurements and identify the breakpoint used
+            to define a cluster.
+        init_breakpoint: int, default 75
+            The initial guess at which there is a breakpoint in the mean enrichment
+            in an annulus vs. annulus radius.
+        return_intermediates : bool, default False
+            Return the DataFrame of the cluster around the most enriched sequence
+            as well as the DataFrame containing the annulus enrichments and the
+            SegmentedLinearModel object used to infer the breakpoint.
+        debug : bool, default False
+            Return the DataFrame containing the annulus enrichments and the
+            SegmentedLinearModel object if a segmented linear regression
+            doesn't fit the data well.
+        **kwargs : dict of { str : any }
+            Keyword arguments to SegmentedLinearModel.fit().
+
+        Returns
+        -------
+        df : polars.DataFrame
+            The DataFrame containing the sample repertoire sequences with an
+            additional column 'transport_cluster' which annotates which cluster
+            a sequence is in.
+        tmp : list of polars.DataFrame
+            List containing from each iteration the DataFrame of the measurements
+            of the mean annulus enrichment for each annulus as well as the number
+            of sequences in each annulus. return_intermediates = True will always
+            return this. debug = True will return this if the segmented linear model
+        is a poor fit.
+        slm : SegmentedLinearModel
+            List containing from each iteration the SegmentedLinearModel object
+            used to fit the breakpoint, giving the radius of a cluster.
+            return_intermediates = True will always return this. debug = True
+            will return this if the segmented linear model is a poor fit.
+        """
         if 'enrichment' not in self.df_samp.columns:
             raise RuntimeError(
                 'No enrichment values were computed for the original sample '
@@ -460,7 +746,7 @@ class TCRTransport():
         num_clusters = 1
         len_df_samp = len(self.df_samp)
 
-        while num_clusters <= max_cluster_count:
+        while num_clusters < max_cluster_count:
             # Obtain the subrepertoire which excludes all the previously
             # clustered TCRs.
             df_samp_sub = self.df_samp.join(
@@ -485,8 +771,8 @@ class TCRTransport():
             )
 
             df_samp_sub = compute_enrichments(
-                df_samp_sub, effort_matrix, distance_vectorform,
-                self.max_distance, self.neighbor_radius
+                df_samp_sub, effort_matrix,
+                distance_vectorform, self.max_distance, self.neighbor_radius
             )
 
             try:
@@ -514,12 +800,12 @@ class TCRTransport():
                     slms.append(res[2])
                 else:
                     df_samp_sub = res
-
                 df_cluster = pl.concat((
                     df_cluster,
                     df_samp_sub.with_columns(
-                    transport_cluster=pl.lit(num_clusters)
-                )))
+                        transport_cluster=pl.lit(num_clusters)
+                    )
+                ))
 
             num_clusters += 1
 
