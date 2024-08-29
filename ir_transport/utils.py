@@ -9,7 +9,7 @@ import tcrdist_rs as tdr
 def load_data(
     data: str | Dict[str, Any] | Sequence | np.ndarray | pl.Series | pd.DataFrame | pl.DataFrame,
     seq_cols: str | Sequence[str],
-    v_cols: str | Sequence[str],
+    v_cols: str | Sequence[str] = None,
     collapse: Optional[str] = None,
     **kwargs
 ) -> pl.DataFrame:
@@ -19,12 +19,12 @@ def load_data(
     Parameters
     ----------
     data : str or dict of {str : any} or Sequence or numpy.ndarray or polars.Series or pandas.DataFrame or polars.DataFrame
-        A variable which points to TCR repertoire data. If a string, data must
+        A variable which points to sequence data. If a string, data must
         point to a valid file to be read. Otherwise, data could be an existing
         DataFrame or two-dimensional data in many forms.
     seq_cols : str or sequence of str
         String(s) which points to the alpha and/or beta CDR3 amino acid sequences.
-    v_cols : str or sequence or str
+    v_cols : str or sequence or str, optional
         String(s) which points to the alpha and/or beta V genes.
     collapse : str, optional
         If 'allele', the V genes have the allele information removed. If 'subfamily',
@@ -36,8 +36,7 @@ def load_data(
     Returns
     -------
     df : polars.DataFrame
-        A DataFrame containing the TCR repertoire annotations deduplicated at the
-        level of recombinations.
+        A DataFrame containing the deduplicated sequence.
     """
     if collapse is not None and collapse not in {'allele', 'subfamily'}:
         raise ValueError(
@@ -71,7 +70,7 @@ def load_data(
     if collapse is not None:
         if v_cols is None:
             raise RuntimeError(
-                'v_cols must not be None is collapse it not None'
+                'v_cols must not be None if collapse it not None'
             )
         new_cols = {
             col: pl.col(col).str.replace_all(r'\*[0-9]+', '')
@@ -89,23 +88,47 @@ def load_data(
                 **new_cols
             )
 
+    if v_cols is not None:
+        grp_cols = list(v_cols) + list(seq_cols)
+    else:
+        grp_cols = seq_cols
+
     df = df.group_by(
-        list(v_cols) + list(seq_cols)
+        grp_cols
     ).agg(
-        recomb_multiplicity=pl.len()
+        multiplicity=pl.len()
     )
 
     return df
 
-def compute_distance_vectorform(
+def compute_distances(
     seqs: NDArray[str],
     seqs_comp: Optional[NDArray[str]] = None,
     species: str = 'human',
-    dtype: str | type = np.int16,
 ) -> NDArray[np.uint16]:
+    """
+    Compute the distances within a dataset of sequences or between two datasets.
+
+    Parameters
+    ----------
+    seqs : numpy.ndarray of str
+        A numpy array of strings.
+    seqs_comp : numpy.ndarray of str, optional
+        A numpy array of strings.
+    species : str, default 'human'
+        The species used for the V gene lookup table in TCRdist.
+
+    Returns
+    -------
+    numpy.ndarray of numpy.uint16
+        The computed TCRdists.
+    """
     # TODO Add support for mice.
-    if seqs.shape[1] == 2:
-        dist_func = f'tcrdist_gene_'
+    # TODO Add support for CDR1, CDR2, CDR3 computations.
+    if len(seqs.shape) == 1:
+        dist_func = 'tcrdist_'
+    elif seqs.shape[1] == 2:
+        dist_func = 'tcrdist_gene_'
     else:
         dist_func = 'tcrdist_paired_gene_'
 
@@ -114,15 +137,79 @@ def compute_distance_vectorform(
         return np.fromiter(
             getattr(tdr, dist_func + func_suffix)(
                 seqs, seqs_comp, parallel=True
-            ), dtype=dtype
+            ), dtype=np.uint16
+        ).reshape(
+            seqs.shape[0], seqs_comp.shape[0]
         )
     else:
         func_suffix = 'matrix'
         return np.fromiter(
             getattr(tdr, dist_func + func_suffix)(
                 seqs, parallel=True
-            ), dtype=dtype
+            ), dtype=np.uint16
         )
+
+def get_neighbor_map(
+    seqs: NDArray[str],
+    neighbor_radius: int,
+    species: str = 'human',
+) -> pl.DataFrame:
+    """
+    Return a DataFrame containing the indices of sequences which are neighbors
+    and their distances.
+
+    Parameters
+    ----------
+    seqs : numpy.ndarray of str
+        A numpy array of strings.
+    neighbor_radius : int
+        The inclusive radius at which sequences are considered neighbors.
+    species : str, default 'human'
+        The species used for the V gene lookup table in TCRdist.
+
+    Returns
+    -------
+    df_neighbors : polars.DataFrame
+        A DataFrame containing the indices of sequences and their neighbors
+        as well as the distance between the sequences.
+    """
+    # TODO Add support for mice.
+    # TODO Add support for tcrdist, no gene, computations.
+    # TODO Add support for CDR1, CDR2, CDR3 computations.
+    if seqs.shape[1] == 2:
+        dist_func = 'tcrdist_gene_'
+    elif seqs.shape[1] == 4:
+        dist_func = 'tcrdist_paired_gene_'
+    else:
+        raise RuntimeError(
+            'seqs must either be the CDR3 and V allele/gene of a single chain '
+            'or the CDR3 and V allele/gene for both chains.'
+        )
+
+    func_suffix = 'neighbor_matrix'
+
+    neighbors = getattr(tdr, dist_func + func_suffix)(
+        seqs, neighbor_radius, parallel=True
+    )
+
+    df_neighbors = pl.DataFrame(
+        neighbors, schema=['index', 'n_index', 'dist'], orient='row',
+        schema_overrides={
+            'index': pl.UInt32, 'n_index': pl.UInt32, 'dist': pl.UInt16
+        }
+    )
+
+    # Concatenate the index and n_index reversed to get all neighbors.
+    df_neighbors = pl.concat((
+        df_neighbors,
+        df_neighbors.select(
+            ['n_index', 'index', 'dist']
+        ).rename({
+            'n_index': 'index', 'index': 'n_index'
+        })
+    ))
+
+    return df_neighbors
 
 def square_indices_to_condensed_idx(
     rows: NDArray[np.integer],

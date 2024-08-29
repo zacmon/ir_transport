@@ -1,11 +1,13 @@
-# TCRTransport
+# IRTransport
 This is a refactoring and updating of [transport](https://github.com/matsengrp/transport/tree/main) from the Matsen lab.
+
+IRTransport uses optimal transport with TCRdist as the metric to detect amino acid sequences which are enriched in one dataset compared to another nonparametrically.
 
 ## Installation
 1. Clone the repository.
 
 ```bash
-git clone https://github.com/zacmon/transport_tcr.git
+git clone https://github.com/zacmon/ir_transport.git
 ```
 
 2. Pip install the package
@@ -19,44 +21,43 @@ I.e., we want to see which sequences from the second repertoire are distinct fro
 Assume that there are the columns `'cdr3b', 'vb'` which point to the BCDR3 and TRBV gene for the TRB receptor sequence.
 
 ```python
-from tcr_transport.tcr_transport import TCRTransport
+from ir_transport.ir_transport import IRTransport
 
-# Create the TCRTransport class object.
-tt = TCRTransport()
+# Create the IRTransport class object.
+irt = IRTransport()
 
 # Add the reference repertoire. The reference bool must be set to True.
-tt.add_repertoire(FILE1, beta_cols=['cdr3b', 'vb'], reference=True)
+irt.add_dataset(FILE1, seq_cols=['cdr3b', 'vb'], reference=True)
 
 # Add the repertoire which is to be compared to the reference repertoire and in which we will look for outlier sequences and clusters.
-tt.add_repertoire(FILE2, beta_cols=['cdr3b', 'vb'])
+irt.add_dataset(FILE2, seq_cols=['cdr3b', 'vb'])
 
 # Compute the sample enrichment on the sample sequences.
-tt.compute_sample_enrichment()
+irt.compute_sample_enrichment()
 
 # Compute the p values of the observed enrichment scores using a randomization test.
-tt.compute_significance()
+irt.compute_significance()
 
 # Create clusters of TCRs using the enrichment score to identify the focal sequence and TCRdist to obtain neighbors
-tt.create_clusters()
+irt.create_clusters()
 ```
 
 If paired-chain data is available, you can point to the columns containg the TRAV gene and ACDR3 sequence. Here we assume, they are pointed to by `'cdr3a', 'va'` (of course, this will depend on the format of your data).
 
 ```python
-from tcr_transport.tcr_transport import TCRTransport
+from ir_transport.ir_transport import IRTransport
 
 # Create the TCRTransport class object. We increase the neighbor_radius from the default of 48 since TCRdist will be larger for paired chain sequences.
-tt = TCRTransport(neighbor_radius=100, maximum_dist=400)
+irt = IRTransport(neighbor_radius=100, maximum_dist=400)
 
 # Add the reference repertoire. The reference bool must be set to True.
-tt.add_repertoire(FILE1, beta_cols=['cdr3b', 'vb'], alpha_cols=['cdr3a', 'va'], reference=True)
+irt.add_dataset(FILE1, seq_cols=['cdr3b', 'vb', 'cdr3a', 'va'], reference=True)
 
 # Add the repertoire which is to be compared to the reference repertoire and in which we will look for outlier sequences and clusters.
-tt.add_repertoire(FILE2, beta_cols=['cdr3b', 'vb'], alpha_cols=['cdr3a', 'va'])
+tt.add_dataset(FILE2, seq_cols=['cdr3b', 'vb', 'cdr3a', 'va'])
 ```
 
 The rest of the functions are as in the single chain case.
-
 
 ## References
 - Olson, B.J., Schattgen, S.A., Thomas, P.G., Bradley, P. and Matsen IV, F.A., 2022. Comparing T cell receptor repertoires using optimal transport. _PLOS Computational Biology_, 18(12), p.e1010681. [https://doi.org/10.1371/journal.pcbi.1010681](https://doi.org/10.1371/journal.pcbi.1010681)

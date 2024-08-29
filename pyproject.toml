@@ -1,9 +1,9 @@
 [project]
-name = 'tcr_transport'
+name = 'ir_transport'
 authors = [
     { name='Zachary Montague', email='zacander.mon@gmail.com'},
 ]
-description = 'TCRTransport is a software developed to compare TCR repertoires nonparametrically using optimal transport.'
+description = 'IRTransport is a software developed to compare TCR and BCR repertoires as well as general amino acid sequence datasets nonparametrically using optimal transport.'
 readme = "README.md"
 requires-python= ">=3.9"
 classifiers = [
@@ -19,7 +19,7 @@ classifiers = [
 
 dependencies = [
     'numpy >= 1.24.4',
-    'polars >= 1.0.0',
+    'polars >= 1.6.0',
     'pot >= 0.9.4',
     'tcrdist_rs >= 0.1.10',
 ]
