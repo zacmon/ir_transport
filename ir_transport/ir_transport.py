@@ -412,7 +412,9 @@ class IRTransport():
                 index=pl.col('index').first()
             ).explode(
                 'sample'
-            )
+            )#.drop(
+            #    'multplicity'
+            #)
             for df, func in zip((self.df_ref, self.df_samp), (pl.zeros, pl.ones))
         ))
 
@@ -458,18 +460,20 @@ class IRTransport():
                 max_distance=self.max_distance,
             )
 
+            assert df_samp_trial['multiplicity'].sum() == self.df_samp['multiplicity'].sum()
+            assert df_ref_trial['multiplicity'].sum() == self.df_ref['multiplicity'].sum()
+
             # Keep only those sequences which appeared in the true sample dataset.
             randomized_scores.append(
                 self.df_samp.join(
                     df_samp_trial,
-                    on=self.common_cols,
+                    on=self.seq_cols,
                     suffix='_trial'
                 )
             )
 
         df_rand = pl.concat(randomized_scores)
-
-        num_tcrs_seen = df_rand.unique(self.common_cols).shape[0]
+        num_tcrs_seen = df_rand.unique(self.seq_cols).shape[0]
         if num_tcrs_seen != self.df_samp.shape[0]:
             num_missing = self.df_samp.shape[0] - num_tcrs_seen
             raise RuntimeError(
@@ -478,7 +482,7 @@ class IRTransport():
             )
 
         min_sample_size = df_rand.select(
-            pl.len().over(self.common_cols).min()
+            pl.len().over(self.seq_cols).min()
         )['len'].item(0)
 
         if min_sample_size == 1:
@@ -488,7 +492,7 @@ class IRTransport():
             )
 
         df_rand = df_rand.with_columns(
-            idx=pl.int_range(pl.len()).over(self.common_cols)
+            idx=pl.int_range(pl.len()).over(self.seq_cols)
         ).filter(
             # Downsample all sequences to the same number.
             pl.col('idx') < min_sample_size
