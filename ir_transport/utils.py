@@ -14,7 +14,7 @@ def load_data(
     **kwargs
 ) -> pl.DataFrame:
     """
-    Load the repertoire data into a polars.DataFrame and perform some preprocessing and filtering.
+    Load the data into a polars.DataFrame and perform some preprocessing and filtering.
 
     Parameters
     ----------
@@ -104,6 +104,7 @@ def load_data(
 def compute_distances(
     seqs: NDArray[str],
     seqs_comp: Optional[NDArray[str]] = None,
+    distance: str = 'tcrdist',
     species: str = 'human',
 ) -> NDArray[np.uint16]:
     """
@@ -115,6 +116,8 @@ def compute_distances(
         A numpy array of strings.
     seqs_comp : numpy.ndarray of str, optional
         A numpy array of strings.
+    distance : str, default 'tcrdist'
+        The distance metric to be used from tcrdist_rs.
     species : str, default 'human'
         The species used for the V gene lookup table in TCRdist.
 
@@ -125,15 +128,18 @@ def compute_distances(
     """
     # TODO Add support for mice.
     # TODO Add support for CDR1, CDR2, CDR3 computations.
-    if len(seqs.shape) == 1:
-        dist_func = 'tcrdist_'
-    elif seqs.shape[1] == 2:
-        dist_func = 'tcrdist_gene_'
+    if distance == 'tcrdist':
+        if seqs.ndim == 1:
+            dist_func = 'tcrdist'
+        elif seqs.shape[1] == 2:
+            dist_func = 'tcrdist_gene'
+        else:
+            dist_func = 'tcrdist_paired_gene'
     else:
-        dist_func = 'tcrdist_paired_gene_'
+        dist_func = distance
 
     if seqs_comp is not None:
-        func_suffix = 'many_to_many'
+        func_suffix = '_many_to_many'
         return np.fromiter(
             getattr(tdr, dist_func + func_suffix)(
                 seqs, seqs_comp, parallel=True
@@ -142,7 +148,7 @@ def compute_distances(
             seqs.shape[0], seqs_comp.shape[0]
         )
     else:
-        func_suffix = 'matrix'
+        func_suffix = '_matrix'
         return np.fromiter(
             getattr(tdr, dist_func + func_suffix)(
                 seqs, parallel=True
@@ -152,6 +158,7 @@ def compute_distances(
 def get_neighbor_map(
     seqs: NDArray[str],
     neighbor_radius: int,
+    distance: str = 'tcrdist',
     species: str = 'human',
 ) -> pl.DataFrame:
     """
@@ -176,17 +183,17 @@ def get_neighbor_map(
     # TODO Add support for mice.
     # TODO Add support for tcrdist, no gene, computations.
     # TODO Add support for CDR1, CDR2, CDR3 computations.
-    if seqs.shape[1] == 2:
-        dist_func = 'tcrdist_gene_'
-    elif seqs.shape[1] == 4:
-        dist_func = 'tcrdist_paired_gene_'
+    if distance == 'tcrdist':
+        if seqs.ndim == 1:
+            dist_func = 'tcrdist'
+        elif seqs.shape[1] == 2:
+            dist_func = 'tcrdist_gene'
+        else:
+            dist_func = 'tcrdist_paired_gene'
     else:
-        raise RuntimeError(
-            'seqs must either be the CDR3 and V allele/gene of a single chain '
-            'or the CDR3 and V allele/gene for both chains.'
-        )
+        dist_func = distance
 
-    func_suffix = 'neighbor_matrix'
+    func_suffix = '_neighbor_matrix'
 
     neighbors = getattr(tdr, dist_func + func_suffix)(
         seqs, neighbor_radius, parallel=True

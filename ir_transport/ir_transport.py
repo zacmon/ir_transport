@@ -1,3 +1,4 @@
+from functools import partial
 import logging
 from typing import *
 
@@ -136,11 +137,9 @@ def compute_enrichments(
     """
     efforts = max_distance * df['multiplicity'].sum() * effort_matrix.sum(axis)
 
-    len_df = df.shape[0]
-
     df = df.with_columns(
         enrichment=efforts,
-        num_neighbors=pl.lit(1, dtype=pl.UInt32)
+        num_neighbors=pl.lit(0, dtype=pl.UInt32)
     )
 
     if no_neighbors or len(neighbor_map) == 0:
@@ -206,11 +205,13 @@ def split_datasets(
 class IRTransport():
     def __init__(
         self,
-        species: str,
+        species: str = 'human',
         distribution_type: str = 'uniform',
         lambd: float = 0.01,
         max_distance: float = 200,
         neighbor_radius: int = 48,
+        distance_func: str | Callable = 'tcrdist',
+        neighbor_func: Optional[Callable] = None,
         seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None,
     ) -> None:
         """
@@ -218,12 +219,12 @@ class IRTransport():
 
         Parameters
         ----------
-        species : str
+        species : str, default 'human'
             This specifies which database should be used when computing TCRdist
             among sequences.
             Presently the only acceptable option is 'human'.
         distribution_type : str, default 'uniform'
-            How the mass distributions of a repertoire should be computed.
+            How the mass distributions of a dataset should be computed.
         lambd : float, 0.01
             The regularization weight for the Sinkhorn solver.
         max_distance : float, default 200
@@ -233,6 +234,13 @@ class IRTransport():
         neighbor_radius : int, default 48
             The inclusive distance at which a sequence is considered another sequence's
             neighbor when computing enrichments.
+        distance_func : str or callable, default 'tcrdist'
+            If string, this gives the distance metric used by tcrdist_rs.
+            If a function, this must follow the utils.compute_distances format.
+        neighbor_func : callable, optional
+            If None, utils.get_neighbor_map is used. If not None, this should
+            follow the utils.get_neighbor_map function and use the same distance
+            as that given by distance_func.
         seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
             The seed for the random number generator. This is used when computing
             the significance of enrichments.
@@ -243,12 +251,27 @@ class IRTransport():
                 f'{species} is not a valid option for species. species must be '
                 f'one of {supported_species_str}.'
             )
-        self.species = species
         self.distribution_type = distribution_type
         self.lambd = lambd
         self.max_distance = max_distance
         self.neighbor_radius = neighbor_radius
         self.rng = np.random.default_rng(seed)
+
+        if isinstance(distance_func, str):
+            self.distance_func = partial(
+                compute_distances, distance=distance_func, species=species
+            )
+            self.neighbor_func = partial(
+                get_neighbor_map, distance=distance_func, species=species
+            )
+        elif neighbor_func is None:
+            raise RuntimeError(
+                'If a custom distance_func is provided, a custom neighbor_func '
+                'must be provided.'
+            )
+        else:
+            self.distance_func = distance_func
+            self.neighbor_func = neighbor_func
 
     def add_dataset(
         self,
@@ -258,12 +281,12 @@ class IRTransport():
         **kwargs: Dict[str, Any],
     ) -> None:
         """
-        Preprocess a repertoire and specify whether if it used as a reference.
+        Preprocess a dataset and specify whether if it used as a reference.
 
         Parameters
         ----------
         data : str or dict of {str : any} or Sequence or numpy.ndarray or polars.Series or pandas.DataFrame or polars.DataFrame
-            A variable which points to the repertoire data. If a string, data must
+            A variable which points to the dataset. If a string, data must
             point to a valid file to be read. Otherwise, data could be an existing
             DataFrame or two-dimensional data in many forms.
         seq_cols : str or sequence of str
@@ -277,7 +300,7 @@ class IRTransport():
             contains six strings, it is assumed that it points to the heavy CDR1, CDR2,
             and CDR3 and light CDR1, CDR2, and CDR3, in that order.
         reference : bool, default False
-            Specifies if the repertoire being added will be used as the reference,
+            Specifies if the dataset being added will be used as the reference,
             i.e., its sequences will not be checked to see if they're enriched.
         **kwargs
             Keyword arguments to utils.load_data.
@@ -287,37 +310,56 @@ class IRTransport():
         None
         """
         self.seq_cols = seq_cols
-        if len(seq_cols) == 2:
-            v_cols = seq_cols[1:]
-            seq_cols = seq_cols[:1]
-        elif len(seq_cols) == 4:
-            v_cols = seq_cols[1::2]
-            seq_cols = seq_cols[::2]
-        else:
+
+        if isinstance(seq_cols, str):
+            self.seq_cols = seq_cols
+            self.common_cols = [self.seq_cols,] + ['multiplicity']
             v_cols = None
+        else:
+            self.common_cols = self.seq_cols + ['multiplicity']
+            if len(seq_cols) == 2:
+                v_cols = seq_cols[1:]
+                seq_cols = seq_cols[:1]
+            elif len(seq_cols) == 4:
+                v_cols = seq_cols[1::2]
+                seq_cols = seq_cols[::2]
 
         df = load_data(data, seq_cols, v_cols, **kwargs).sort(
             # Sort for consistency between runs.
             self.seq_cols
         ).with_row_index()
 
+        if hasattr(self.distance_func, 'keywords'):
+            if 'tcrdist' in self.distance_func.keywords.values():
+                only_nt = df.select(
+                    res=pl.any_horizontal(
+                        pl.col(seq_cols).str.contains('^[TGAC~_\*]+$')
+                    ).any()
+                )['res'].item(0)
+                if only_nt:
+                    raise RuntimeError(
+                        'tcrdist is being used as the distance metric, but at '
+                        'least one column for defining sequences contains '
+                        'nucleotide sequences only. Column(s) for defining the '
+                        f'sequences: {seq_cols}.'
+                    )
+
         if reference:
             self.df_ref = df
         else:
             self.df_samp = df
 
-        self.common_cols = self.seq_cols + ['multiplicity']
-
-    def compute_sample_enrichment(
+    def compute_enrichment(
         self,
         no_neighbors: bool = False,
+        compute_reference_enrichment: bool = False,
     ) -> None:
         """
-        Compute the enrichments of sequences in the non-reference repertoire.
+        Compute the enrichments of sequences in the non-reference dataset.
 
-        The TCRdist among sequences in the sample are computed, the mass
-        distirbutions of each sample are computed, and the TCRdist matrix
-        among all sequences in the reference and sample repertoires are computed.
+        The distances among sequences in the sample are computed, the mass
+        distirbutions of each sample are computed, and the distance matrix
+        among all sequences in the reference and sample datasets are computed.
         Then the effort matrix is computed by inferring an optimal transport map.
         Finally, the enrichments are computed.
 
@@ -325,17 +367,21 @@ class IRTransport():
         ----------
         no_neighbors : bool, default False
             If True, do not incorporate neighbors when computing enrichments.
+        compute_reference_enrichment : bool, default False
+            If True, compute the enrichments of the sequences in the reference dataset.
 
         Returns
         -------
-        None
+        self.df_samp
+            The sample DataFrame with columns containing information about the
+            enrichment score and the number of neighbors the sequence has.
         """
-        self.sample_neighbor_map = get_neighbor_map(
-            self.df_samp[self.seq_cols].to_numpy(), self.neighbor_radius, self.species
+        self.sample_neighbor_map = self.neighbor_func(
+            self.df_samp[self.seq_cols].to_numpy(), self.neighbor_radius,
         )
         self.mass_ref = get_mass_distribution(self.df_ref, self.seq_cols)
         self.mass_samp = get_mass_distribution(self.df_samp, self.seq_cols)
-        self.distance_matrix = compute_distances(
+        self.distance_matrix = self.distance_func(
             self.df_ref[self.seq_cols].to_numpy(),
             self.df_samp[self.seq_cols].to_numpy(),
         ) / self.max_distance
@@ -349,21 +395,33 @@ class IRTransport():
             max_distance=self.max_distance, no_neighbors=no_neighbors
         )
 
+        if compute_reference_enrichment:
+            self.reference_neighbor_map = self.neighbor_func(
+                self.df_ref[self.seq_cols].to_numpy(), self.neighbor_radius
+            )
+            self.df_ref = compute_enrichments(
+                self.df_ref, self.effort_matrix, self.reference_neighbor_map,
+                max_distance=self.max_distance, no_neighbors=no_neighbors,
+                axis=1
+            )
+            return self.df_samp, self.df_ref
+
         return self.df_samp
 
     def compute_significance(
         self,
         trial_count: int = 100,
         seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None,
+        compute_reference_significance: bool = False
     ) -> pl.DataFrame:
         """
         Compute the significance of the calculated enrichment using a randomization test.
 
-        In a single randomization trial, the input repertoires are concatened
-        and randomly partitioned into the original sizes of the repertoires.
-        Enrichments are calculated for sequences in the shuffled repertoire
-        which is the same size as the original sample repertoire, and p values
-        are estimated.
+        In a single randomization trial, the input datasets are concatenated
+        and randomly partitioned into the original sizes of the datasets.
+        Enrichments are calculated for sequences in the shuffled dataset
+        which is the same size as the original sample dataset, and p values
+        are estimated using ECDFS obtained from the trials.
 
         Paramaters
         ----------
@@ -373,35 +431,47 @@ class IRTransport():
         seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
             The seed for the random number generator. If None, the object's rng
             attribute will be used.
+        compute_reference_significance : bool, default False
+            Compute the significance of the sequences in the reference dataset
+            simultaneously.
 
         Returns
         -------
-        df_rand : polars.DataFrame
-            The sample repertoire DataFrame annotated with statistics from the
+        self.df_samp : polars.DataFrame
+            The sample dataset  DataFrame annotated with statistics from the
             randomization test.
+        self.df_ref : polars.DataFrame
+            The reference dataset  DataFrame annotated with statistics from the
+            randomization test. This is returned if compute_reference_significance=True.
         """
         if 'enrichment' not in self.df_samp.columns:
             raise RuntimeError(
                 'No enrichment values were computed for the original sample '
-                'repertoire, so no significance can be computed. Please run '
-                'compute_sample_enrichment() using the IRTransport object '
+                'dataset, so significance cannot be computed. Please run '
+                'compute_enrichment() using the IRTransport object '
                 'and then try running this function again.'
             )
+
+        if compute_reference_significance:
+            if 'enrichment' not in self.df_ref.columns:
+                raise RuntimeError(
+                    'No enrichment values were computed for the original reference '
+                    'dataset, so significance cannot be computed. Please run '
+                    'compute_enrichment(compute_reference_enrichment=True) using '
+                    'the IRTransport object and then try running this function again.'
+                )
+
 
         if seed is not None:
             rng = self.rng
         else:
             rng = np.random.default_rng(seed)
 
-        #ref_distance_vectorform = compute_distance_vectorform(
-        #    self.df_ref[self.seq_cols].to_numpy()
-        #)
-
         # TODO Change to weighted sampling instead of expanding fully?
         # TODO Avoid concatenating both DataFrames and pull samples directly
         #      from self.df_samp and self.df_rep?
         df_full = pl.concat((
-            # Expand the DataFrame to the full size of the repertoires to sample
+            # Expand the DataFrame to the full size of the datasets to sample
             # sequences individually, labeling which sequences came from which DataFrame.
             df.select(
                 self.common_cols
@@ -412,15 +482,14 @@ class IRTransport():
                 index=pl.col('index').first()
             ).explode(
                 'sample'
-            )#.drop(
-            #    'multplicity'
-            #)
+            )
             for df, func in zip((self.df_ref, self.df_samp), (pl.zeros, pl.ones))
         ))
 
         num_ref = self.df_ref['multiplicity'].sum()
 
-        randomized_scores = []
+        sample_randomized_scores = []
+        reference_randomized_scores = []
 
         for trial in range(trial_count):
             df_ref_trial, df_samp_trial = split_datasets(df_full, num_ref, rng)
@@ -429,7 +498,7 @@ class IRTransport():
                 self.seq_cols
             ).agg(
                 multiplicity=pl.len()
-            )
+            ).with_row_index()
 
             df_samp_trial = df_samp_trial.group_by(
                 self.seq_cols
@@ -441,12 +510,11 @@ class IRTransport():
             mass_samp_trial = get_mass_distribution(df_samp_trial, self.seq_cols)
 
             # TODO Use precomputed distance matrix and vectorforms.
-            samp_trial_neighbor_map = get_neighbor_map(
+            samp_trial_neighbor_map = self.neighbor_func(
                 df_samp_trial[self.seq_cols].to_numpy(), self.neighbor_radius,
-                self.species
             )
 
-            distance_matrix = compute_distances(
+            distance_matrix = self.distance_func(
                 df_ref_trial[self.seq_cols].to_numpy(),
                 df_samp_trial[self.seq_cols].to_numpy(),
             ) / self.max_distance
@@ -464,7 +532,7 @@ class IRTransport():
             assert df_ref_trial['multiplicity'].sum() == self.df_ref['multiplicity'].sum()
 
             # Keep only those sequences which appeared in the true sample dataset.
-            randomized_scores.append(
+            sample_randomized_scores.append(
                 self.df_samp.join(
                     df_samp_trial,
                     on=self.seq_cols,
@@ -472,38 +540,60 @@ class IRTransport():
                 )
             )
 
-        df_rand = pl.concat(randomized_scores)
-        num_tcrs_seen = df_rand.unique(self.seq_cols).shape[0]
-        if num_tcrs_seen != self.df_samp.shape[0]:
-            num_missing = self.df_samp.shape[0] - num_tcrs_seen
-            raise RuntimeError(
-                f'Not all sequences were seen over all trials (missing {num_missing} from '
-                f'{self.df_samp.shape[0]} total). Increase the trial_count.'
+            if not compute_reference_significance:
+                continue
+
+            ref_trial_neighbor_map = self.neighbor_func(
+                df_ref_trial[self.seq_cols].to_numpy(), self.neighbor_radius
+            )
+            df_ref_trial = compute_enrichments(
+                df_ref_trial, effort_matrix, ref_trial_neighbor_map,
+                max_distance=self.max_distance, axis=1
+            )
+            reference_randomized_scores.append(
+                self.df_ref.join(
+                    df_ref_trial,
+                    on=self.seq_cols,
+                    suffix='_trial'
+                )
             )
 
-        min_sample_size = df_rand.select(
+        df_samp_rand = pl.concat(sample_randomized_scores)
+        num_sample_seqs_seen = df_samp_rand.unique(self.seq_cols).shape[0]
+        if num_sample_seqs_seen != self.df_samp.shape[0]:
+            num_missing = self.df_samp.shape[0] - num_sample_seqs_seen
+            raise RuntimeError(
+                'Not all sequences were seen from the sample dataset over all '
+                f'trials (missing {num_missing} from {self.df_samp.shape[0]} total). '
+                'Increase the trial_count.'
+            )
+
+        min_sample_size = df_samp_rand.select(
             pl.len().over(self.seq_cols).min()
         )['len'].item(0)
 
         if min_sample_size == 1:
             raise RuntimeError(
-                'Trials will be downsampled to 1 sequence, resulting in '
-                'poor statistics. Rerun after increasing the trial_count.'
+                'The minimum number of times a sample-dataset sequence was seen '
+                'was 1. This will result in poor statistics. Rerun with an increased '
+                'trial_count.'
             )
 
-        df_rand = df_rand.with_columns(
+        self.df_samp = df_samp_rand.with_columns(
             idx=pl.int_range(pl.len()).over(self.seq_cols)
         ).filter(
-            # Downsample all sequences to the same number.
+            # Downsample all sequences to the same amount.
             pl.col('idx') < min_sample_size
         ).group_by(
             pl.exclude('^*trial$', 'idx')
         ).agg(
             scores=pl.col('enrichment_trial').sort(),
-            z_score=((pl.col('enrichment') - pl.col('enrichment_trial').mean())
-                     / pl.col('enrichment_trial').std()).first(),
+            z_score=(
+                (pl.col('enrichment').first() - pl.col('enrichment_trial').mean())
+                / pl.col('enrichment_trial').std()
+            ),
             ecdf=pl.int_range(0, pl.len() + 1) / pl.len(),
-            search_sort=pl.col('enrichment_trial').sort().search_sorted(pl.col('enrichment')).first()
+            search_sort=pl.col('enrichment_trial').sort().search_sorted(pl.col('enrichment').first())
         ).with_columns(
             p_value=1 - pl.col('ecdf').list.get(pl.col('search_sort'))
         ).drop(
@@ -512,7 +602,54 @@ class IRTransport():
             'index'
         )
 
-        return df_rand
+        if not compute_reference_significance:
+            return self.df_samp
+
+        df_ref_rand = pl.concat(reference_randomized_scores)
+        num_reference_seqs_seen = df_ref_rand.unique(self.seq_cols).shape[0]
+        if num_reference_seqs_seen != self.df_ref.shape[0]:
+            num_missing = self.df_ref.shape[0] - num_sample_seqs_seen
+            raise RuntimeError(
+                'Not all sequences were seen from the reference dataset over all '
+                f'trials (missing {num_missing} from {self.df_ref.shape[0]} total).'
+                'Increase the trial_count.'
+            )
+
+        min_sample_size = df_ref_rand.select(
+            pl.len().over(self.seq_cols).min()
+        )['len'].item(0)
+
+        if min_sample_size == 1:
+            raise RuntimeError(
+                'The minimum number of times a reference-dataset sequence was seen '
+                'was 1. This will result in poor statistics. Rerun with an increased '
+                'trial_count.'
+            )
+
+        self.df_ref = df_ref_rand.with_columns(
+            idx=pl.int_range(pl.len()).over(self.seq_cols)
+        ).filter(
+            # Downsample all sequences to the same amount.
+            pl.col('idx') < min_sample_size
+        ).group_by(
+            pl.exclude('^*trial$', 'idx')
+        ).agg(
+            scores=pl.col('enrichment_trial').sort(),
+            z_score=(
+                (pl.col('enrichment').first() - pl.col('enrichment_trial').mean())
+                / pl.col('enrichment_trial').std()
+            ),
+            ecdf=pl.int_range(0, pl.len() + 1) / pl.len(),
+            search_sort=pl.col('enrichment_trial').sort().search_sorted(pl.col('enrichment').first()),
+        ).with_columns(
+            p_value=1 - pl.col('ecdf').list.get(pl.col('search_sort'))
+        ).drop(
+            ['ecdf', 'search_sort']
+        ).sort(
+            'index'
+        )
+
+        return self.df_samp, self.df_ref
 
     def cluster(
         self,
@@ -574,22 +711,20 @@ class IRTransport():
         if 'enrichment' not in df.columns:
             raise RuntimeError(
                 'No enrichment values were computed for the given input'
-                'repertoire DataFrame, so a cluster cannot be create. Please '
+                'dataset\'s DataFrame, so a cluster cannot be create. Please '
                 'compute the enrichment for the clones and then try running this '
                 'function again.'
             )
 
         if quantile < 0 or quantile >= 1:
-            raise ValueError(
-                'quantile must be in [0, 1).'
-            )
+            raise ValueError('quantile must be in [0, 1).')
 
         max_score_arg_max = df['enrichment'].arg_max()
         max_score = df[max_score_arg_max, 'enrichment']
 
         # Compute the distance between the most enriched sequence in the DataFrame
         # and every sequence in the DataFrame.
-        distance_vec = compute_distances(
+        distance_vec = self.distance_func(
             df[max_score_arg_max, self.seq_cols].to_numpy(),
             df[self.seq_cols].to_numpy()
         ).ravel()
@@ -599,13 +734,13 @@ class IRTransport():
         annulus_searchsort = np.searchsorted(radii, distance_vec, 'left')
 
         df = df.with_columns(
-            enrichment_above_median=pl.col('enrichment') >= pl.col('enrichment').quantile(quantile),
+            enrichment_above_quantile=pl.col('enrichment') >= pl.col('enrichment').quantile(quantile),
             dist_to_max_score=distance_vec,
             # Assign sequences to annuluses.
             annulus_idx=annulus_searchsort
         ).filter(
-            # Keep upper 50% enrichment sequences only.
-            (pl.col('enrichment_above_median'))
+            # Keep upper-quantile enrichment sequences only.
+            (pl.col('enrichment_above_quantile'))
             # Remove sequences beyond the max annulus radius.
             & (pl.col('annulus_idx') < len(radii) - 1)
         ).with_columns(
@@ -668,13 +803,14 @@ class IRTransport():
         step: int = 5,
         init_breakpoint: float = None,
         quantile: float = 0.5,
+        dataset: str = 'sample',
         return_intermediates: bool = False,
         debug: bool = False,
         **kwargs
     ) -> pl.DataFrame | Tuple[pl.DataFrame, List[pl.DataFrame], List[SegmentedLinearModel]]:
         """
         Create clusters around each consecutive unclustered but most enriched sequence
-        in the sample repertoire dataset.
+        in the sample or reference dataset.
 
         Parameters
         ----------
@@ -691,6 +827,8 @@ class IRTransport():
             Sequences with enrichments at least as large as the enrichment specified
             by this quantile will which will be considered as potential neighbors
             to the clusters.
+        dataset : str, default 'sample'
+            Which dataset on which clustering will be performed.
         return_intermediates : bool, default False
             Return the DataFrame of the cluster around the most enriched sequence
             as well as the DataFrame containing the annulus enrichments and the
@@ -705,7 +843,7 @@ class IRTransport():
         Returns
         -------
         df : polars.DataFrame
-            The DataFrame containing the sample repertoire sequences with an
+            The DataFrame containing the full dataset's sequences with an
             additional column 'transport_cluster' which annotates which cluster
             a sequence is in.
         tmp : list of polars.DataFrame
@@ -720,22 +858,35 @@ class IRTransport():
             return_intermediates = True will always return this. debug = True
             will return this if the segmented linear model is a poor fit.
         """
-        if 'enrichment' not in self.df_samp.columns:
+        if dataset == 'sample':
+            df = self.df_samp
+            msg = ''
+        elif dataset == 'reference':
+            df = self.df_ref
+            msg = 'compute_reference_enrichment=True'
+        else:
+            raise ValueError(
+                'dataset must be \'sample\' or \'reference\'.'
+            )
+
+        if 'enrichment' not in df:
             raise RuntimeError(
-                'No enrichment values were computed for the original sample '
-                'repertoire, so no clusters can be created. Please run '
-                'compute_sample_enrichment() using the IRTransport object '
+                f'No enrichment values were computed for the original {dataset} '
+                'dataset, so no clusters can be created. Please run '
+                f'compute_sample_enrichment({msg}) using the IRTransport object '
                 'and then try running this function again.'
             )
+
+        neighbor_map = getattr(self, f'{dataset}_neighbor_map')
 
         tmp_dfs = []
         slms = []
 
-        # Build the initial cluster from the complete sample repertoire.
+        # Build the initial cluster from the full dataset.
         try:
             res = self.cluster(
-                quantile=quantile, step=step, init_breakpoint=init_breakpoint,
-                debug=debug, return_intermediates=return_intermediates, **kwargs,
+                df, step, init_breakpoint, quantile, return_intermediates,
+                debug, **kwargs
             )
             if debug:
                 if not isinstance(res, pl.DataFrame):
@@ -763,53 +914,62 @@ class IRTransport():
             )
 
         num_clusters = 1
-        len_df_samp = len(self.df_samp)
 
         while num_clusters < max_cluster_count:
-            # Obtain the subrepertoire which excludes all the previously
+            # Obtain the subsample which excludes all the previously
             # clustered sequences.
-            df_samp_sub = self.df_samp.filter(
+            df_sub = df.filter(
                 ~pl.col('index').is_in(df_cluster['index'])
             ).with_row_index(
                 'sub_index'
             )
 
-            len_samp_sub = len(df_samp_sub)
-
-            mass_samp_sub = get_mass_distribution(df_samp_sub, self.seq_cols)
+            mass_sub = get_mass_distribution(df_sub, self.seq_cols)
 
             # Remove already clustered sequences from the neighbor map and map
-            # the original indices to the indices in the subrepertoire DataFrame.
-            neighbor_map = self.sample_neighbor_map.filter(
+            # the original indices to the indices in the subsample's DataFrame.
+            sub_neighbor_map = neighbor_map.filter(
                 ~(pl.col('index').is_in(df_cluster['index']) | pl.col('n_index').is_in(df_cluster['index']))
             ).with_columns(
                 sub_index=pl.col('index').replace(
-                    df_samp_sub['index'],
-                    df_samp_sub['sub_index']
+                    df_sub['index'],
+                    df_sub['sub_index']
                 ),
                 n_index=pl.col('n_index').replace(
-                    df_samp_sub['index'],
-                    df_samp_sub['sub_index']
+                    df_sub['index'],
+                    df_sub['sub_index']
                 )
             )
 
-            # Get the subrepertoire's distance matrix by using a view.
-            distance_matrix = self.distance_matrix[:, df_samp_sub['index']]
-
-            effort_matrix = compute_effort_matrix(
-                self.mass_ref, mass_samp_sub, distance_matrix, self.lambd
-            )
-
-            df_samp_sub = compute_enrichments(
-                df_samp_sub, effort_matrix, neighbor_map, 'sub_index', max_distance=self.max_distance
-            ).drop(
-                'sub_index'
-            )
+            if dataset == 'sample':
+                # Get the subsample's distance matrix by using a view.
+                distance_matrix = self.distance_matrix[:, df_sub['index']]
+                effort_matrix = compute_effort_matrix(
+                    self.mass_ref, mass_sub, distance_matrix, self.lambd
+                )
+                df_sub = compute_enrichments(
+                    df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
+                    max_distance=self.max_distance
+                ).drop(
+                    'sub_index'
+                )
+            else:
+                # Get the subsample's distance matrix by using a view.
+                distance_matrix = self.distance_matrix[df_sub['index'], :]
+                effort_matrix = compute_effort_matrix(
+                    mass_sub, self.mass_samp, distance_matrix, self.lambd
+                )
+                df_sub = compute_enrichments(
+                    df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
+                    max_distance=self.max_distance, axis=1
+                ).drop(
+                    'sub_index'
+                )
 
             try:
                 res = self.cluster(
-                    df_samp_sub, step, init_breakpoint, quantile,
-                    return_intermediates, debug, **kwargs
+                    df_sub, step, init_breakpoint, quantile, return_intermediates,
+                    debug, **kwargs
                 )
                 if debug:
                     if not isinstance(res, pl.DataFrame):
@@ -826,26 +986,37 @@ class IRTransport():
                     raise e
             else:
                 if return_intermediates:
-                    df_samp_sub, tmp_df, slm = res
+                    df_sub, tmp_df, slm = res
                     tmp_dfs.append(res[1])
                     slms.append(res[2])
                 else:
-                    df_samp_sub = res
+                    df_sub = res
                 df_cluster = pl.concat((
                     df_cluster,
-                    df_samp_sub.with_columns(
+                    df_sub.with_columns(
                         transport_cluster=pl.lit(num_clusters)
                     )
                 ))
 
             num_clusters += 1
 
-        self.df_samp =  self.df_samp.join(
-            df_cluster, on=self.common_cols, how='left'
-        ).drop(
-            pl.col('^*right$')
-        )
+        if dataset == 'sample':
+            self.df_samp =  self.df_samp.join(
+                df_cluster, on=self.common_cols, how='left'
+            ).drop(
+                pl.col('^*right$')
+            )
 
-        if return_intermediates:
-            return self.df_samp, tmp_dfs, slms
-        return self.df_samp
+            if return_intermediates:
+                return self.df_samp, tmp_dfs, slms
+            return self.df_samp
+        else:
+            self.df_ref =  self.df_ref.join(
+                df_cluster, on=self.common_cols, how='left'
+            ).drop(
+                pl.col('^*right$')
+            )
+
+            if return_intermediates:
+                return self.df_ref, tmp_dfs, slms
+            return self.df_ref
