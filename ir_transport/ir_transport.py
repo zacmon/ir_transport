@@ -920,7 +920,7 @@ class IRTransport():
         try:
             slm.fit(init_breakpoint, **kwargs)
         except Exception as e:
-            if 'At least one breakpoint is outside of the domain' in str(e):
+            if 'Breakpoint analysis failed' in str(e):
                 if debug:
                     return tmp, slm
                 raise RuntimeError(
@@ -929,7 +929,14 @@ class IRTransport():
             else:
                 raise e
 
-        if slm.max0_params[0] < 1e-10:
+        regression_failed = False
+        # No difference in slope.
+        if slm.max0_params[0] < 1e-5:
+            regression_failed = True
+        # Breakpoint error is high.
+        elif slm.breakpoint_se[0] > slm.breakpoints[0]:
+            regression_failed = True
+        if regression_failed:
             if debug:
                 return tmp, slm
             raise RuntimeError(
@@ -1042,7 +1049,7 @@ class IRTransport():
                 debug, **kwargs
             )
             if debug:
-                if not isinstance(res, pl.DataFrame):
+                if isinstance(res, tuple) and len(res) == 2:
                     logging.info(
                         'Segmented linear model did not find a breakpoint. Returning '
                         'the DataFrame used to fit the model as well as the model object.'
@@ -1129,7 +1136,7 @@ class IRTransport():
                     debug, **kwargs
                 )
                 if debug:
-                    if not isinstance(res, pl.DataFrame):
+                    if isinstance(res, tuple) and len(res) == 2:
                         logging.info(
                             'Segmented linear model did not find a breakpoint. Returning '
                             'the DataFrame used to fit the model as well as the model object.'

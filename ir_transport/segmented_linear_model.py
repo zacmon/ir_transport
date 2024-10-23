@@ -1,7 +1,6 @@
 from typing import *
 
 import numpy as np
-from numpy.linalg import lstsq
 from numpy.typing import NDArray
 
 def preprocess_input(
@@ -66,6 +65,52 @@ def _eval(
     max0_vals = np.maximum(x - breakpoints[:, None], 0)
     return intercept + slope * x + np.sum(max0_vals * max0_params[:, None], 0)
 
+def compute_r_squared(
+    y: NDArray[np.float64],
+    y_est: NDArray[np.float64],
+    num_params: int
+) -> Tuple[np.float64]:
+    """
+    """
+    y_mean = np.mean(y)
+    total_sum_squares = np.sum((y - y_mean)**2)
+    residual_sum_squares = np.sum((y - y_est)**2)
+    r_squared = 1 - residual_sum_squares / total_sum_squares
+
+    num_data = len(y)
+    coef = (num_data - 1) / (len_data - num_params - 1)
+    adj_r_squared = 1 - (1 - r_squared) * coef
+
+    return residual_sum_squares, total_sum_squares, r_squared, adj_r_squared
+
+def compute_standard_errors(
+    params: Tuple[NDArray[np.float64]],
+    cov_mat: NDArray[np.float64],
+) -> Tuple[NDArray[np.float64]]:
+    """
+    """
+    num_breakpoints = (len(cov_mat) - 2) // 2
+    variances = np.diagonal(cov_mat)
+
+    intercept_se = np.sqrt(variances[0])
+    max0_var = variances[2:num_breakpoints + 2]
+    max0_se = np.sqrt(max0_var)
+
+    indicator_var = variances[2 + num_breakpoints:]
+    ratio = params[3] / params[2]
+    idxs = np.arange(0, num_breakpoints)
+    breakpoint_se = np.sqrt((
+        indicator_var
+        + max0_var * ratio**2
+        - 2 * cov_mat[idxs + 2, idxs + 2 + num_breakpoints] * ratio
+    ) / params[2]**2)
+
+    slope_se = np.sqrt(
+        [np.sum(cov_mat[1:k, 1:k]) for k in range(2, 3 + num_breakpoints)]
+    )
+
+    return intercept_se, slope_se, max0_se, breakpoint_se
+
 class SegmentedLinearModel(object):
     """
     Class to fit piecewise linear models by inferring breakpoints.
@@ -89,9 +134,10 @@ class SegmentedLinearModel(object):
             The seed for the random number generator.
         """
         self.x, self.y = preprocess_input(x, y)
-        self.x_min = x.min()
-        self.x_max = x.max()
-
+        self.x_min = self.x.min()
+        self.x_max = self.x.max()
+        self.lower_breakpoint_bound = self.x[0] + (self.x[1] - self.x[0]) / 2
+        self.upper_breakpoint_bound = self.x[-1] - (self.x[-1] - self.x[-2]) / 2
         self.rng = np.random.default_rng(seed)
 
     def _fit(
@@ -165,9 +211,7 @@ class SegmentedLinearModel(object):
             )
 
         if breakpoints is not None:
-            if not hasattr(breakpoints, '__len__'):
-                breakpoints = [breakpoints]
-            breakpoints = np.sort(np.array(breakpoints))
+            breakpoints = np.sort(np.asarray(breakpoints))
         else:
             if num_breakpoints < 1:
                 raise ValueError(
@@ -191,19 +235,18 @@ class SegmentedLinearModel(object):
         num_breakpoints = len(breakpoints)
         ones = np.ones_like(x)
         previous_delta = 0
-
         for _ in range(maxiter):
             x_diff_bkpts = x - breakpoints[:, None]
             max0_vals = np.maximum(x_diff_bkpts, 0)
             indicator_vals = (x_diff_bkpts > 0).astype(np.float64)
             coeff_mat = np.vstack((ones, x, max0_vals, indicator_vals))
 
-            sol =  lstsq(coeff_mat.T, y, rcond=None)[0]
-
+            sol, residuals, rank, singular_vals = np.linalg.lstsq(coeff_mat.T, y, rcond=None)
             intercept, slope = sol[0:2]
             max0_params = sol[2:2 + num_breakpoints]
 
             indicator_params = sol[2 + num_breakpoints:]
+            # TODO What to do when max0_params is 0?
             delta = indicator_params / max0_params
 
             y_est = (
@@ -222,36 +265,34 @@ class SegmentedLinearModel(object):
 
             breakpoints = breakpoints - delta
             previous_delta = delta
-
-        if breakpoints.min() < x_min:
-            raise RuntimeError(
-                'At least one breakpoint is outside of the domain. (The minimum '
-                'inferred breakpoint is smaller than the given x.) '
-                'Is the model over- or underparameterized? Are there better values '
-                'for the initial breakpoint guesses? Inspect y vs. x to get '
-                'a better sense of how many breakpoints there might be and at what '
-                'values the breakpoints should be initialized.'
-            )
-        if breakpoints.max() > x_max:
-            raise RuntimeError(
-                'At least one breakpoint is outside of the domain. (The maximum '
-                'inferred breakpoint is larger than the given x.) '
-                'Is the model over- or underparameterized? Are there better values '
-                'for the initial breakpoint guesses? Inspect y vs. x to get '
-                'a better sense of how many breakpoints there might be and at what '
-                'values the breakpoints should be initialized.'
+            breakpoints = np.clip(
+                breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
             )
 
-        return intercept, slope, breakpoints, max0_params, indicator_params
+        if len(residuals) == 0:
+            raise RuntimeError(
+                'Breakpoint analysis failed. Regression did not converge.'
+            )
 
-    # TODO Ensure bootstrap method is performed as in R segmented.
+        dof = x.shape[0] - coeff_mat.shape[0]
+        cov_mat = np.linalg.inv(coeff_mat @ coeff_mat.T) * residuals / dof
+
+        to_return = (
+            intercept, slope, breakpoints, max0_params, indicator_params,
+            residuals, cov_mat, rank, singular_vals
+        )
+
+        return to_return
+
+    # TODO Implement Davies test.
     def fit(
         self,
         breakpoints: Sequence[float] = None,
         num_breakpoints: int = 1,
         maxiter: int = 30,
         tol: float = 1e-8,
-        num_bootstraps: int = 0,
+        num_bootstraps: int = 10,
+        num_restarts: int = 1000,
         seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None
     ) -> None:
         """
@@ -284,17 +325,57 @@ class SegmentedLinearModel(object):
             raise ValueError(
                 'num_bootstraps must be >= 0.'
             )
+        if not num_restarts >= 0:
+            raise ValueError(
+                'num_restarts must be >= 0.'
+            )
+
         if seed is not None:
             rng = np.random.default_rng(seed)
         else:
             rng = self.rng
 
-        params = self._fit(
-            breakpoints, num_breakpoints, maxiter, tol
-        )
+        if breakpoints is not None:
+            if not hasattr(breakpoints, '__len__'):
+                breakpoints = [breakpoints]
+            breakpoints = np.asarray(breakpoints)
+            num_breakpoints = len(breakpoints)
 
-        score = np.sum((self.y - _eval(self.x, *params[:-1]))**2)
+        # Fit the original data.
+        # TODO Make use of parallel routines for multiple starting points.
+        params = None
+        try:
+            params = self._fit(
+                breakpoints, num_breakpoints, maxiter, tol
+            )
+        except Exception as e:
+            if num_restarts == 0:
+                raise e
+            # If the original guess or using quantiles doesn't converge,
+            # use random points until something converges.
+            tries = 0
+            while tries < num_restarts:
+                breakpoints = self.rng.uniform(
+                    low=self.lower_breakpoint_bound, high=self.upper_breakpoint_bound,
+                    size=num_breakpoints
+                )
+                try:
+                    params = self._fit(
+                        breakpoints, num_breakpoints, maxiter, tol
+                    )
+                except:
+                    tries += 1
+                else:
+                    break
 
+        if params is None:
+            raise RuntimeError(
+                'Breakpoint analysis failed. Try increasing num_restarts '
+                'or run a davies test to see if any breakpoints might even '
+                'exist in the data.'
+            )
+
+        score = np.sum((self.y - _eval(self.x, *params[:4]))**2)
         len_data = len(self.x)
 
         for _ in range(num_bootstraps):
@@ -302,6 +383,8 @@ class SegmentedLinearModel(object):
             x_bootstrap = self.x[bootstrap_idxs]
             y_bootstrap = self.y[bootstrap_idxs]
 
+
+            # Fit bootstrapped data.
             try:
                 params_bootstrap = self._fit(
                     params[2], maxiter=maxiter, tol=tol, x=x_bootstrap, y=y_bootstrap
@@ -309,22 +392,33 @@ class SegmentedLinearModel(object):
             except:
                 params_bootstrap = params
 
+            # Fit original data using parameters from bootstrap fit.
             try:
                 new_params = self._fit(
                     params_bootstrap[2], maxiter=maxiter, tol=tol
                 )
-            except:
+            except Exception as e:
                 continue
 
-            new_score = np.sum((self.y - _eval(self.x, *new_params[:-1]))**2)
+            new_score = np.sum((self.y - _eval(self.x, *new_params[:4]))**2)
             if new_score < score:
                 params = new_params
+                score = new_score
 
         self.intercept = params[0]
         self.slope = params[1]
         self.breakpoints = params[2]
         self.max0_params = params[3]
         self.indicator_params = params[4]
+        self.residuals = params[5]
+        self.cov_mat = params[6]
+        self.rank = params[7]
+        self.singular_vals = params[8]
+
+        (self.intercept_se, self.slope_se,
+         self.max0_se, self.breakpoint_se) = compute_standard_errors(
+             params[:5], self.cov_mat
+         )
 
     def eval(
         self,
@@ -344,3 +438,28 @@ class SegmentedLinearModel(object):
             The estimated ordinate values using the fitted model parameters.
         """
         return _eval(x, self.intercept, self.slope, self.breakpoints, self.max0_params)
+
+    def print_segmented_input(
+        self
+    ) -> None:
+        """
+        Print statements to screen for running R segmented package.
+
+        This is useful for comparing this module's inference to Muggeo's
+        segmented package.
+
+        Parameters
+        ----------
+        None
+
+        Returns
+        -------
+        None
+        """
+        to_print = 'library(\'segmented\')\n'
+        to_print += 'x <- c(' + str(list(self.x))[1:-1] + ')\n'
+        to_print += 'y <- c(' + str(list(self.y))[1:-1] + ')\n'
+        to_print += 'lm_fit <- lm(y~x, data=list(x, y))\n'
+        to_print += 's <- segmented(lm_fit, npsi=1)\n'
+        to_print += 'summary(s)\n' + 'davies.test(lm_fit)\n'
+        print(to_print)
