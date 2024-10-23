@@ -241,7 +241,8 @@ class SegmentedLinearModel(object):
             indicator_vals = (x_diff_bkpts > 0).astype(np.float64)
             coeff_mat = np.vstack((ones, x, max0_vals, indicator_vals))
 
-            sol, residuals, rank, singular_vals = np.linalg.lstsq(coeff_mat.T, y, rcond=None)
+            pinv = np.linalg.pinv(coeff_mat.T)
+            sol = pinv @ y
             intercept, slope = sol[0:2]
             max0_params = sol[2:2 + num_breakpoints]
 
@@ -269,17 +270,13 @@ class SegmentedLinearModel(object):
                 breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
             )
 
-        if len(residuals) == 0:
-            raise RuntimeError(
-                'Breakpoint analysis failed. Regression did not converge.'
-            )
-
+        residuals = np.sum((coeff_mat.T @ sol - y)**2)
         dof = x.shape[0] - coeff_mat.shape[0]
-        cov_mat = np.linalg.inv(coeff_mat @ coeff_mat.T) * residuals / dof
+        cov_mat = (pinv @ pinv.T) * residuals / dof
 
         to_return = (
             intercept, slope, breakpoints, max0_params, indicator_params,
-            residuals, cov_mat, rank, singular_vals
+            residuals, cov_mat,
         )
 
         return to_return
@@ -412,8 +409,6 @@ class SegmentedLinearModel(object):
         self.indicator_params = params[4]
         self.residuals = params[5]
         self.cov_mat = params[6]
-        self.rank = params[7]
-        self.singular_vals = params[8]
 
         (self.intercept_se, self.slope_se,
          self.max0_se, self.breakpoint_se) = compute_standard_errors(
