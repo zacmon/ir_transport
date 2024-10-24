@@ -538,7 +538,7 @@ class IRTransport():
 
         counter = 0
         desc = 'Randomizing datasets and computing enrichment'
-        with tqdm(desc=desc, total=trial_count) as progress_bar:
+        with tqdm(desc=desc, position=0, total=trial_count) as progress_bar:
             while counter < trial_count:
                 df_ref_trial, df_samp_trial = split_datasets(df_full, num_ref, rng)
 
@@ -827,7 +827,7 @@ class IRTransport():
             in an annulus vs. annulus radius.
         quantile : float, default 0.5
             Sequences with enrichments at least as large as the enrichment specified
-            by this quantile will which will be considered as potential neighbors
+            by this quantile will be considered as potential neighbors
             to the clusters.
         return_intermediates : bool, default False
             Return the DataFrame of the cluster around the most enriched sequence
@@ -934,8 +934,8 @@ class IRTransport():
         if slm.max0_params[0] < 1e-5:
             regression_failed = True
         # Breakpoint error is high.
-        elif slm.breakpoint_se[0] > slm.breakpoints[0]:
-            regression_failed = True
+        #elif slm.breakpoint_se[0] > slm.breakpoints[0]:
+        #    regression_failed = True
         if regression_failed:
             if debug:
                 return tmp, slm
@@ -1040,7 +1040,7 @@ class IRTransport():
         tmp_dfs = []
         slms = []
 
-        progress_bar = tqdm(desc='Creating clusters', total=max_cluster_count)
+        progress_bar = tqdm(desc='Creating clusters', position=0, total=max_cluster_count)
         progress_bar_closed = False
         # Build the initial cluster from the full dataset.
         try:

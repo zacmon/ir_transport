@@ -419,7 +419,7 @@ class SegmentedLinearModel(object):
                 pass
             else:
                 best_params = params
-                y_est = _eval(x, *params[:4])
+                y_est = _eval(self.x, *params[:4])
                 best_rss = np.sum((self.y - y_est)**2)
 
         if self.len_data <= 2 + 2 * num_breakpoints:
