@@ -964,6 +964,7 @@ class IRTransport():
         dataset: str = 'sample',
         return_intermediates: bool = False,
         debug: bool = False,
+        recompute_unclustered_enrichments: bool = False,
         **kwargs
     ) -> pl.DataFrame | Tuple[pl.DataFrame, List[pl.DataFrame], List[SegmentedLinearModel]]:
         """
@@ -995,6 +996,10 @@ class IRTransport():
             Return the DataFrame containing the annulus enrichments and the
             SegmentedLinearModel object if a segmented linear regression
             doesn't fit the data well.
+        recompute_unclustered_enrichments : bool, default False
+            Compute the enrichments of the remaining unclustered dataset against
+            the other dataset, and use those enrichments to perform clustering.
+            The default option uses the enrichments computed from the full dataset.
         **kwargs : dict of { str : any }
             Keyword arguments to SegmentedLinearModel.fit().
 
@@ -1009,7 +1014,7 @@ class IRTransport():
             of the mean annulus enrichment for each annulus as well as the number
             of sequences in each annulus. return_intermediates = True will always
             return this. debug = True will return this if the segmented linear model
-        is a poor fit.
+            is a poor fit.
         slm : SegmentedLinearModel
             List containing from each iteration the SegmentedLinearModel object
             used to fit the breakpoint, giving the radius of a cluster.
@@ -1088,47 +1093,46 @@ class IRTransport():
                 'sub_index'
             )
 
-            mass_sub = get_mass_distribution(df_sub, self.seq_cols)
+            if recompute_unclustered_enrichments:
+                # Remove already clustered sequences from the neighbor map and map
+                # the original indices to the indices in the subsample's DataFrame.
+                sub_neighbor_map = neighbor_map.filter(
+                    ~(pl.col('index').is_in(df_cluster['index']) | pl.col('n_index').is_in(df_cluster['index']))
+                ).with_columns(
+                    sub_index=pl.col('index').replace(
+                        df_sub['index'],
+                        df_sub['sub_index']
+                    ),
+                    n_index=pl.col('n_index').replace(
+                        df_sub['index'],
+                        df_sub['sub_index']
+                    )
+                )
 
-            # Remove already clustered sequences from the neighbor map and map
-            # the original indices to the indices in the subsample's DataFrame.
-            sub_neighbor_map = neighbor_map.filter(
-                ~(pl.col('index').is_in(df_cluster['index']) | pl.col('n_index').is_in(df_cluster['index']))
-            ).with_columns(
-                sub_index=pl.col('index').replace(
-                    df_sub['index'],
-                    df_sub['sub_index']
-                ),
-                n_index=pl.col('n_index').replace(
-                    df_sub['index'],
-                    df_sub['sub_index']
-                )
-            )
+                mass_sub = get_mass_distribution(df_sub, self.seq_cols)
 
-            if dataset == 'sample':
-                # Get the subsample's distance matrix by using a view.
-                distance_matrix = self.distance_matrix[:, df_sub['index']]
-                effort_matrix = compute_effort_matrix(
-                    self.mass_ref, mass_sub, distance_matrix, self.lambd
-                )
-                df_sub = compute_enrichments(
-                    df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
-                    max_distance=self.max_distance
-                ).drop(
-                    'sub_index'
-                )
-            else:
-                # Get the subsample's distance matrix by using a view.
-                distance_matrix = self.distance_matrix[df_sub['index'], :]
-                effort_matrix = compute_effort_matrix(
-                    mass_sub, self.mass_samp, distance_matrix, self.lambd
-                )
-                df_sub = compute_enrichments(
-                    df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
-                    max_distance=self.max_distance, axis=1
-                ).drop(
-                    'sub_index'
-                )
+                if dataset == 'sample':
+                    # Get the subsample's distance matrix by using a view.
+                    distance_matrix = self.distance_matrix[:, df_sub['index']]
+                    effort_matrix = compute_effort_matrix(
+                        self.mass_ref, mass_sub, distance_matrix, self.lambd
+                    )
+                    df_sub = compute_enrichments(
+                        df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
+                        max_distance=self.max_distance
+                    )
+                else:
+                    # Get the subsample's distance matrix by using a view.
+                    distance_matrix = self.distance_matrix[df_sub['index'], :]
+                    effort_matrix = compute_effort_matrix(
+                        mass_sub, self.mass_samp, distance_matrix, self.lambd
+                    )
+                    df_sub = compute_enrichments(
+                        df_sub, effort_matrix, sub_neighbor_map, 'sub_index',
+                        max_distance=self.max_distance, axis=1
+                    )
+
+            df_sub = df_sub.drop('sub_index')
 
             try:
                 res = self.cluster(
