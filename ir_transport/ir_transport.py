@@ -479,14 +479,14 @@ class IRTransport():
         if trial_type != 'target' and trial_type != 'total':
             raise ValueError('trial_type must be \'total\' or \'target\'.')
 
-        if seed is not None:
+        if seed is None:
             rng = self.rng
         else:
             rng = np.random.default_rng(seed)
 
         # TODO Change to weighted sampling instead of expanding fully?
         # TODO Avoid concatenating both DataFrames and pull samples directly
-        #      from self.df_samp and self.df_rep?
+        #      from self.df_samp and self.df_rep using numpy.repeat and the indices?
         df_full = pl.concat((
             # Expand the DataFrame to the full size of the datasets to sample
             # sequences individually, labeling which sequences came from which DataFrame.
@@ -501,7 +501,10 @@ class IRTransport():
                 'sample'
             )
             for df, func in zip((self.df_ref, self.df_samp), (pl.zeros, pl.ones))
-        ))
+        )).sort(
+            # Sort for reproducibility.
+            self.common_cols
+        )
 
         num_ref = self.df_ref['multiplicity'].sum()
 
@@ -669,7 +672,9 @@ class IRTransport():
 
             min_sample_size = min(min_sample_size, min_ref_size)
 
-        estimate_significance = lambda x: x.with_columns(
+        estimate_significance = lambda x: x.select(
+            pl.exclude(['scores', 'z_score'])
+        ).with_columns(
             idx=pl.int_range(pl.len()).over(self.seq_cols)
         ).filter(
             # Downsample all sequences to the same amount.
@@ -703,7 +708,7 @@ class IRTransport():
 
     def adjust_pvalues(
         self,
-        method: str = 'storey',
+        method: str = 'bh',
         **kwargs: Dict[str, Any]
     ) -> pl.DataFrame | Tuple[pl.DataFrame]:
         """
@@ -712,16 +717,9 @@ class IRTransport():
         If p values for the sample and reference datasets are both computed,
         their p values are corrected together.
 
-        The default method used for correction ('storey') gives Storey q values.
-        Ideally, the histogram of p values is inspected prior to applying
-        multiple testing corrections. If the histogram of p values is flat
-        for p > 0.5, then Storey q values are appropriate. If the histogram
-        of p values is noisy or the size of the dataset is small,
-        Benjamini-Hochberg ('bh') might be more appropriate.
-
         Parameters
         ----------
-        method : str, default 'storey'
+        method : str, default 'bh'
             Method using for adjusting the p values. Available methods:
                 'bonferonni' _[1]
                 'sidak' _[2]
@@ -807,9 +805,10 @@ class IRTransport():
         df: Optional[pl.DataFrame] = None,
         step: int = 5,
         init_breakpoint: float = None,
-        quantile: float = 0.5,
-        return_intermediates: bool = False,
+        quantile: float = 0.,
         debug: bool = False,
+        min_abs_slope_change: float = 1e-5,
+        davies_p_threshold: float = 1e-2,
         **kwargs: Dict[str, Any],
     ) -> pl.DataFrame | Tuple[pl.DataFrame, SegmentedLinearModel]:
         """
@@ -825,14 +824,10 @@ class IRTransport():
         init_breakpoint: int, default optional
             The initial guess at which there is a breakpoint in the mean enrichment
             in an annulus vs. annulus radius.
-        quantile : float, default 0.5
+        quantile : float, default 0.
             Sequences with enrichments at least as large as the enrichment specified
             by this quantile will be considered as potential neighbors
             to the clusters.
-        return_intermediates : bool, default False
-            Return the DataFrame of the cluster around the most enriched sequence
-            as well as the DataFrame containing the annulus enrichments and the
-            SegmentedLinearModel object used to infer the breakpoint.
         debug : bool, default False
             Return the DataFrame containing the annulus enrichments and the
             SegmentedLinearModel object if a segmented linear regression
@@ -848,13 +843,9 @@ class IRTransport():
         tmp : polars.DataFrame
             The DataFrame containing the measurements of the mean annulus enrichment
             for each annulus as well as the number of sequences in each annulus.
-            return_intermediates = True will always return this. debug = True will
-            return this if the segmented linear model is a poor fit.
         slm : SegmentedLinearModel
             The SegmentedLinearModel object used to fit the breakpoint, giving
-            the radius of a cluster. return_intermediates = True will always
-            return this. debug = True will return this if the segmented linear
-            model is a poor fit.
+            the radius of a cluster.
         """
         if df is None:
             df = self.df_samp
@@ -869,6 +860,9 @@ class IRTransport():
 
         if quantile < 0 or quantile >= 1:
             raise ValueError('quantile must be in [0, 1).')
+
+        if len(df) == 1:
+            return df.with_columns(cluster_radius=0.), None, None
 
         max_score_arg_max = df['enrichment'].arg_max()
         max_score = df[max_score_arg_max, 'enrichment']
@@ -913,7 +907,6 @@ class IRTransport():
                 pl.col('sum_enrichment').cum_sum() / pl.col('num_in_annulus').cum_sum()
             )
         )
-
         slm = SegmentedLinearModel(
             tmp['annulus_radius'], tmp['mean_annulus_enrichment'],
         )
@@ -931,11 +924,15 @@ class IRTransport():
 
         regression_failed = False
         # No difference in slope.
-        if slm.max0_params[0] < 1e-5:
+        if np.abs(slm.max0_params[0]) < min_abs_slope_change:
             regression_failed = True
         # Breakpoint error is high.
         #elif slm.breakpoint_se[0] > slm.breakpoints[0]:
         #    regression_failed = True
+        # Not much evidence for a breakpoint.
+        #elif slm.davies_p > davies_p_threshold:
+        #    regression_failed = True
+
         if regression_failed:
             if debug:
                 return tmp, slm
@@ -949,20 +946,16 @@ class IRTransport():
             (pl.col('dist_to_max_score') <= cluster_radius )
         ).drop(
             ('annulus_idx', 'annulus_radius', 'enrichment_above_quantile', 'dist_to_max_score')
+        ).with_columns(
+            cluster_radius=cluster_radius
         )
 
-        if return_intermediates:
-            return df, tmp, slm
-        return df
+        return df, tmp, slm
 
     def create_clusters(
         self,
         max_cluster_count: int = 10,
-        step: int = 5,
-        init_breakpoint: float = None,
-        quantile: float = 0.5,
         dataset: str = 'sample',
-        return_intermediates: bool = False,
         debug: bool = False,
         recompute_unclustered_enrichments: bool = False,
         **kwargs
@@ -975,23 +968,8 @@ class IRTransport():
         ----------
         max_cluster_count : int, default 10
             The number of clusters to form.
-        step : int, default 5
-            The width of the annuluses around the most enriched sequence. This
-            is used to collect measurements and identify the breakpoint used
-            to define a cluster.
-        init_breakpoint: int, optional
-            The initial guess at which there is a breakpoint in the mean enrichment
-            in an annulus vs. annulus radius.
-        quantile : float, default 0.5
-            Sequences with enrichments at least as large as the enrichment specified
-            by this quantile will which will be considered as potential neighbors
-            to the clusters.
         dataset : str, default 'sample'
             Which dataset on which clustering will be performed.
-        return_intermediates : bool, default False
-            Return the DataFrame of the cluster around the most enriched sequence
-            as well as the DataFrame containing the annulus enrichments and the
-            SegmentedLinearModel object used to infer the breakpoint.
         debug : bool, default False
             Return the DataFrame containing the annulus enrichments and the
             SegmentedLinearModel object if a segmented linear regression
@@ -1001,7 +979,7 @@ class IRTransport():
             the other dataset, and use those enrichments to perform clustering.
             The default option uses the enrichments computed from the full dataset.
         **kwargs : dict of { str : any }
-            Keyword arguments to SegmentedLinearModel.fit().
+            Keyword arguments to ir_transport.cluster().
 
         Returns
         -------
@@ -1012,20 +990,19 @@ class IRTransport():
         tmp : list of polars.DataFrame
             List containing from each iteration the DataFrame of the measurements
             of the mean annulus enrichment for each annulus as well as the number
-            of sequences in each annulus. return_intermediates = True will always
-            return this. debug = True will return this if the segmented linear model
-            is a poor fit.
+            of sequences in each annulus.
+            debug = True will return this if the segmented linear model is a poor fit.
         slm : SegmentedLinearModel
             List containing from each iteration the SegmentedLinearModel object
             used to fit the breakpoint, giving the radius of a cluster.
-            return_intermediates = True will always return this. debug = True
-            will return this if the segmented linear model is a poor fit.
         """
         if dataset == 'sample':
             df = self.df_samp
+            slm_attr = 'slm_samp'
             msg = ''
         elif dataset == 'reference':
             df = self.df_ref
+            slm_attr = 'slm_ref'
             msg = 'compute_reference_enrichment=True'
         else:
             raise ValueError(
@@ -1042,16 +1019,15 @@ class IRTransport():
 
         neighbor_map = getattr(self, f'{dataset}_neighbor_map')
 
+        setattr(self, slm_attr, [])
         tmp_dfs = []
-        slms = []
 
         progress_bar = tqdm(desc='Creating clusters', position=0, total=max_cluster_count)
         progress_bar_closed = False
         # Build the initial cluster from the full dataset.
         try:
             res = self.cluster(
-                df, step, init_breakpoint, quantile, return_intermediates,
-                debug, **kwargs
+                df, debug=debug, **kwargs
             )
             if debug:
                 if isinstance(res, tuple) and len(res) == 2:
@@ -1069,12 +1045,9 @@ class IRTransport():
                 raise e
             return
         else:
-            if return_intermediates:
-                df_cluster, tmp_df, slm = res
-                tmp_dfs.append(tmp_df)
-                slms.append(slm)
-            else:
-                df_cluster = res
+            df_cluster, tmp_df, slm = res
+            getattr(self, slm_attr).append(slm)
+            tmp_dfs.append(tmp_df)
 
             df_cluster = df_cluster.with_columns(
                 transport_cluster=pl.lit(0)
@@ -1092,6 +1065,11 @@ class IRTransport():
             ).with_row_index(
                 'sub_index'
             )
+
+            if len(df_sub) == 0:
+                progress_bar.close()
+                progress_bar_closed = True
+                break
 
             if recompute_unclustered_enrichments:
                 # Remove already clustered sequences from the neighbor map and map
@@ -1136,8 +1114,7 @@ class IRTransport():
 
             try:
                 res = self.cluster(
-                    df_sub, step, init_breakpoint, quantile, return_intermediates,
-                    debug, **kwargs
+                    df_sub, debug=debug, **kwargs
                 )
                 if debug:
                     if isinstance(res, tuple) and len(res) == 2:
@@ -1155,12 +1132,9 @@ class IRTransport():
                 else:
                     raise e
             else:
-                if return_intermediates:
-                    df_sub, tmp_df, slm = res
-                    tmp_dfs.append(res[1])
-                    slms.append(res[2])
-                else:
-                    df_sub = res
+                df_sub, tmp_df, slm = res
+                tmp_dfs.append(res[1])
+                getattr(self, slm_attr).append(res[2])
                 df_cluster = pl.concat((
                     df_cluster,
                     df_sub.with_columns(
@@ -1181,9 +1155,7 @@ class IRTransport():
                 pl.col('^*right$')
             )
 
-            if return_intermediates:
-                return self.df_samp, tmp_dfs, slms
-            return self.df_samp
+            return self.df_samp, tmp_dfs, self.slm_samp
         else:
             self.df_ref =  self.df_ref.join(
                 df_cluster, on=self.common_cols, how='left'
@@ -1191,6 +1163,4 @@ class IRTransport():
                 pl.col('^*right$')
             )
 
-            if return_intermediates:
-                return self.df_ref, tmp_dfs, slms
-            return self.df_ref
+            return self.df_ref, tmp_dfs, self.slm_ref
