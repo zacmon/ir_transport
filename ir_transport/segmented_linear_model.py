@@ -2,7 +2,8 @@ from typing import *
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import ndtr
+from scipy.special import factorial, stdtr
+from scipy.optimize import minimize_scalar
 
 def preprocess_input(
     x: Sequence[float],
@@ -34,28 +35,24 @@ def preprocess_input(
     mask_finite = np.isfinite(x) & np.isfinite(y)
     return x[mask_finite], y[mask_finite]
 
-def _compute_coeff_matrix(
+def _create_design_matrices(
     x: NDArray[np.float64],
     breakpoints: NDArray[np.float64],
-    ones: Optional[NDArray[np.float64]] = None
-) -> Tuple[NDArray[np.float64]]:
-    """
-    """
-    if ones is None:
-        ones = np.ones_like(x)
-
-    x_diff_bkpts = x - breakpoints[:, None]
-    max0_vals = np.maximum(x_diff_bkpts, 0)
-    indicator_vals = (x_diff_bkpts > 0).astype(np.float64)
-    coeff_mat = np.vstack((ones, x, max0_vals, indicator_vals))
-    return coeff_mat, max0_vals
-
-def _compute_coeff_matrices(
-    x: NDArray[np.float64],
-    breakpoints: NDArray[np.float64],
-    ones: Optional[NDArray[np.float64]] = None
 ) -> NDArray[np.float64]:
     """
+    Return design matrices for testing different breakpoints.
+
+    Parameters
+    ----------
+    x : numpy.ndarray of numpy.float64
+        Independent variables.
+    breakpoints : numpy.ndarray of numpy.float64
+        The breakpoints to be tested.
+
+    Returns
+    -------
+    design_mats : numpy.ndarray of numpy.float64
+        Array of design matrices.
     """
     x_diff_bkpts = x - breakpoints[..., None]
     max0_vals = np.maximum(x_diff_bkpts, 0)
@@ -64,10 +61,10 @@ def _compute_coeff_matrices(
     x_for_mat = np.tile(x, breakpoints.shape[0]).reshape(
         breakpoints.shape[0], x.shape[0]
     )
-    coeff_mats = np.hstack((ones, x_for_mat, max0_vals, indicator_vals)).reshape(
+    design_mats = np.hstack((ones, x_for_mat, max0_vals, indicator_vals)).reshape(
         breakpoints.shape[0], 4, x.shape[0]
     )
-    return coeff_mats.swapaxes(1, 2)
+    return design_mats.swapaxes(1, 2)
 
 def _eval(
     x: Sequence[float],
@@ -101,6 +98,7 @@ def _eval(
     max0_vals = np.maximum(x - breakpoints[:, None], 0)
     return intercept + slope * x + np.sum(max0_vals * max0_params[:, None], 0)
 
+# TODO Actually report this.
 def compute_r_squared(
     y: NDArray[np.float64],
     y_est: NDArray[np.float64],
@@ -124,6 +122,19 @@ def compute_standard_errors(
     cov_mat: NDArray[np.float64],
 ) -> Tuple[NDArray[np.float64]]:
     """
+    Return the standard errors for the intercept, slope, slope-change, and breakpoints.
+
+    Parameters
+    ----------
+    params : tuple fo numpy.ndarray of numpy.float64
+        The inferred segmented linear model parameters.
+    cov_mat : numpy.ndarray of numpy.float64
+        The covariance matrix from the linear regression used to infer the model.
+
+    Returns
+    -------
+    tuple of numpy.ndarray of numpy.float64
+        The standard errors for the parameters.
     """
     num_breakpoints = (len(cov_mat) - 2) // 2
     variances = np.diagonal(cov_mat)
@@ -133,13 +144,13 @@ def compute_standard_errors(
     max0_se = np.sqrt(max0_var)
 
     indicator_var = variances[2 + num_breakpoints:]
-    ratio = params[3] / params[2]
+    ratio = params[4] / params[3]
     idxs = np.arange(0, num_breakpoints)
     breakpoint_se = np.sqrt((
         indicator_var
         + max0_var * ratio**2
         - 2 * cov_mat[idxs + 2, idxs + 2 + num_breakpoints] * ratio
-    ) / params[2]**2)
+    ) / params[3]**2)
 
     slope_se = np.sqrt(
         [np.sum(cov_mat[1:k, 1:k]) for k in range(2, 3 + num_breakpoints)]
@@ -155,43 +166,130 @@ def compute_davies(
     alternative: str = 'two-sided',
 ) -> Tuple[np.float64]:
     """
+    Compute the Davies statistic and p value to determine if there is evidence
+    for at least one breakpoint in the data.
+
+    Parameters
+    ----------
+    x : sequence of float
+        Independent variables that will be used for fitting the model.
+    y : sequence of float
+        Ordinate variables that will be used for fitting the model.
+    n_points : int, default 10
+        How many points will be used to probe where breakpoints could be.
+    bounds : sequence of numpy.float64, optional
+        The lower and upper bound of the interval used for testing.
+    alternative : str, default 'two-sided'
+        Which alternative hypothesis is being tested.
+
+    Returns
+    -------
+    x_best : numpy.float64
+        The x at which there is the most evidence for a breakpoint.
+    p : numpy.float64
+        The Davies p value.
+
+    References
+    ----------
+    .. [1] Davies R (2002) "Hypothesis testing when a nuisance parameter
+           is present only under the alternative: Linear model case."
+           Biometrika 89(2), 484-489, https://doi.org/10.1093/biomet/89.2.484
     """
     if bounds is None:
         bounds = (x[1], x[-2])
     interval = np.linspace(bounds[0], bounds[1], n_points)
-    coeff_mats = _compute_coeff_matrices(x, interval)
+    design_mats = _create_design_matrices(x, interval)[:, :, :3]
 
-    pinvs = np.linalg.pinv(coeff_mats)
+    df = len(x) - 3
+
+    pinvs = np.linalg.pinv(design_mats)
     sols = np.tensordot(pinvs, y, [2, 0])
-    y_ests = np.einsum('ijk,ik->ij', coeff_mats, sols)
+    y_ests = np.einsum('ijk,ik->ij', design_mats, sols)
     residuals = np.sum((y_ests - y)**2, 1)
     cov_mats = np.einsum('ijk,ilk->ijl', pinvs, pinvs)
-    max0_param_se = np.sqrt(cov_mats[:, 2, 2] * residuals / (len(x) - 4))
+    max0_param_se = np.sqrt(cov_mats[:, 2, 2] * residuals / df)
+
+    # Eq. 4, Davies (2002).
     stats = sols[:, 2] / max0_param_se
 
+    # Eq. 5, Davies (2002).
+    z_sq = sols[:, 2]**2 / cov_mats[:, 2, 2]
+    beta_analogue = z_sq / (z_sq + residuals)
+
+    # Total variation (between Eq. 11 and Eq. 12 in Davies (2002)).
+    v = np.abs(np.diff(np.arcsin(beta_analogue**0.5))).sum()
+
+    # Follow Muggeo in davies.test.r in R segmented package.
     if alternative == 'two-sided':
         abs_stats = np.abs(stats)
         argbest = np.argmax(abs_stats)
         stat = abs_stats[argbest]
         x_best = interval[argbest]
+        p = 1 - stdtr(df, stat)
     elif alternative == 'less':
-        abs_stats = np.abs(stats)
-        argbest = np.argmin(abs_stats)
-        stat = abs_stats[argbest]
+        argbest = np.argmin(stats)
+        stat = stats[argbest]
         x_best = interval[argbest]
+        p = stdtr(df, stat)
     else:
         argbest = np.argmax(stats)
         stat = stats[argbest]
         stat = np.max(stats)
         x_best = interval[argbest]
+        p = 1 - stdtr(df, stat)
 
-    v = np.abs(np.diff(stats)).sum()
-    p = ndtr(-stat) + v * np.exp(-0.5 * stat**2) / np.sqrt(8 * np.pi)
+    # u and adjustment defined after Eq. 12 in Davies (2002).
+    u = stat**2  / (df + stat**2)
+    adjustment = (
+        v * (1 - u)**((df - 1) * 0.5)
+        * factorial(df / 2 - 0.5)
+        / (2 * factorial(df / 2 - 1) * np.pi**0.5)
+    )
+    p = p + adjustment
 
     if alternative == 'two-sided':
         p *= 2
 
-    return x_best, p
+    return x_best, np.minimum(p, 1)
+
+def search_min(
+    momentum: np.float64,
+    new_breakpoints: NDArray[np.float64],
+    old_breakpoints: NDArray[np.float64],
+    ones_x_mat: NDArray[np.float64],
+    y: NDArray[np.float64]
+) -> np.float64:
+    """
+    Return the segmented linear loss for a given momentum.
+
+    This is used when finding the best momentum when adjusting an update
+    of the breakpoints in SegmentedLinearModel._fit().
+
+    Parameters
+    ----------
+    momentum : numpy.float64
+        A number in [0, 1].
+    new_breakpoints : numpy.ndarray of numpy.float64
+        A set of breakpoints.
+    old_breakpoints : numpy.ndarray of numpy.float64
+        Another set of breakpoints.
+    ones_x_mat : numpy.ndarray of numpy.float64
+        A portion of the design matrix which is independent of the breakpoints.
+    y : numpy.ndarray of numpy.float64
+        The dependent variables.
+
+    Returns
+    -------
+    numpy.float64
+        The sum of squared residuals.
+    """
+    breakpoints_mix = momentum * new_breakpoints + (1 - momentum) * old_breakpoints
+    breakpoints_diff_x = ones_x_mat[1] - breakpoints_mix[:, None]
+    design_mat = np.vstack((ones_x_mat, np.maximum(breakpoints_diff_x, 0)))
+    pinv = np.linalg.pinv(design_mat.T)
+    sol = pinv @ y
+    y_ests = design_mat.T @ sol
+    return np.sum((y - y_ests)**2)
 
 class SegmentedLinearModel(object):
     """
@@ -229,14 +327,15 @@ class SegmentedLinearModel(object):
         num_breakpoints: int = 1,
         maxiter: int = 30,
         tol: float = 1e-5,
+        h: float = 1.25,
         x: Sequence[float] = None,
         y: Sequence[float] = None,
     ) -> Tuple[np.float64, NDArray[np.float64]]:
         """
         Fit a segmented linear model using the algorithm by Muggeo [1]_.
 
-        Function is originally based off https://datascience.stackexchange.com/a/32833,
-        and the segmented R package is at https://cran.r-project.org/web/packages/segmented/.
+        Function is adapted from the seg.lm.fit.r script from the segmented R
+        package at https://cran.r-project.org/web/packages/segmented/.
 
         Parameters
         ----------
@@ -248,8 +347,11 @@ class SegmentedLinearModel(object):
             then num_breakpoints is ignored.
         maxiter : int, default 30
             Maximum number of iterations to perform.
-        tol : float, optional
+        tol : float, 1e-5
             Tolerance for convergence.
+        h : float, default 1.25
+            Positive factor modifying the increments in breakpoint updates
+            during the estimation process.
         x : sequence of float, optional
             Independent variables. If None, use self.x.
         y : sequence of float, optional
@@ -308,42 +410,72 @@ class SegmentedLinearModel(object):
 
         num_breakpoints = len(breakpoints)
         ones = np.ones_like(x)
-        previous_delta = 0
+        ones_x_mat = np.vstack((ones, x))
+        x_diff_bkpts = x - breakpoints[:, None]
+        max0_vals = np.maximum(x_diff_bkpts, 0)
+        design_mat = np.vstack((ones_x_mat, max0_vals)).T
+        pinv = np.linalg.pinv(design_mat)
+        sol = pinv @ y
+        rss = np.sum(((design_mat @ sol) - y)**2)
+
+        design_mat = np.vstack((
+            ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64)
+        )).T
         for _ in range(maxiter):
-            coeff_mat, max0_vals = _compute_coeff_matrix(x, breakpoints, ones)
-            pinv = np.linalg.pinv(coeff_mat.T)
+            pinv = np.linalg.pinv(design_mat)
             sol = pinv @ y
             intercept, slope = sol[0:2]
             max0_params = sol[2:2 + num_breakpoints]
 
             indicator_params = sol[2 + num_breakpoints:]
-            # TODO What to do when max0_params is 0?
+
+            if np.isclose(0, sol[2:]).any():
+                raise RuntimeError(
+                    'At least one segmented linear model parameter is close to 0. '
+                    'Are too many breakpoints being estimated? Is there enough '
+                    'evidence for breakpoints in the data?'
+                )
             delta = indicator_params / max0_params
 
-            # Algorithm is oscillating but has essentially converged.
-            if np.allclose(np.abs(previous_delta), np.abs(delta)):
-                break
+            new_breakpoints = breakpoints - h * delta
+            new_breakpoints = np.clip(
+                new_breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
+            )
 
-            loss = np.max(np.abs(indicator_params))
-            # Change in breakpoint is within precision tolerance of convergence.
-            if loss < tol:
-                break
-
-            breakpoints = breakpoints - delta
-            previous_delta = delta
+            # Although not in Muggeo (2003), the optimal momentum is computed
+            # using the updated breakpoints and the previous breakpoints.
+            res = minimize_scalar(
+                search_min, bracket=(0, 1), bounds=(0, 1),
+                args=(new_breakpoints, breakpoints, ones_x_mat, y)
+            )
+            opt_momentum = res.x
+            res_loss = res.fun
+            breakpoints = opt_momentum * new_breakpoints + (1 - opt_momentum) * breakpoints
             breakpoints = np.clip(
                 breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
             )
+            epsilon = np.abs(rss - res_loss) / (rss + 0.1)
+            rss = res_loss
 
-        residuals = np.sum((coeff_mat.T @ sol - y)**2)
-        dof = self.len_data - coeff_mat.shape[0]
+            x_diff_bkpts = x - breakpoints[:, None]
+            max0_vals = np.maximum(x_diff_bkpts, 0)
+            design_mat = np.vstack((
+                ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64)
+            )).T
+
+            if epsilon < tol:
+                break
+
+        pinv = np.linalg.pinv(design_mat)
+        sol = pinv @ y
+        residuals = np.sum((design_mat @ sol - y)**2)
+        dof = self.len_data - design_mat.shape[1]
         cov_mat = (pinv @ pinv.T) * residuals / dof
 
         to_return = (
             intercept, slope, breakpoints, max0_params, indicator_params,
             residuals, cov_mat,
         )
-
         return to_return
 
     def fit(
@@ -353,7 +485,6 @@ class SegmentedLinearModel(object):
         maxiter: int = 30,
         tol: float = 1e-8,
         num_davies: int = 10,
-        search_size: int = 100,
         num_bootstraps: int = 10,
         seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None
     ) -> None:
@@ -375,8 +506,6 @@ class SegmentedLinearModel(object):
             Tolerance for convergence.
         num_davies : int, default 10
             The size of the interval used for computing the Davies test p value.
-        search_size : int, default 100
-            The amount of random values used to find a good initial breakpoint guess.
         num_bootstraps : int, default 0
             The number of bootstrap inferences for escaping local minima.
         seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
@@ -389,8 +518,6 @@ class SegmentedLinearModel(object):
         """
         if not num_bootstraps >= 0:
             raise ValueError('num_bootstraps must be >= 0.')
-        if not search_size >= 0:
-            raise ValueError('search_size must be >= 0.')
         if num_breakpoints < 1:
             raise ValueError('num_breakpoints must be >= 1.')
         if seed is not None:
@@ -410,7 +537,7 @@ class SegmentedLinearModel(object):
             breakpoints = np.sort(np.asarray(breakpoints))
             num_breakpoints = len(breakpoints)
             if self.len_data <= 2 + 2 * num_breakpoints:
-                raise runtimeerror('breakpoint analysis failed. too few datapoints.')
+                raise RuntimeError('Breakpoint analysis failed. Too few datapoints.')
             try:
                 params = self._fit(
                     breakpoints, num_breakpoints, maxiter, tol
@@ -426,14 +553,12 @@ class SegmentedLinearModel(object):
             raise RuntimeError('Breakpoint analysis failed. Too few datapoints.')
 
         # TODO Generalize to multiple breakpoints and clean up.
+        # Let number of breakpoints tested be chosen by the user.
+        # Necessary anymore?
         if  num_breakpoints == 1:
-            breakpoints = self.rng.uniform(
-                self.lower_breakpoint_bound, self.upper_breakpoint_bound,
-                size=search_size
-            )
-            breakpoints = np.concatenate((breakpoints, self.x[2:-3]))
-            coeff_mats = _compute_coeff_matrices(self.x, breakpoints)
-            pinvs = np.linalg.pinv(coeff_mats)
+            breakpoints = self.x[2:-2]
+            design_mats = _create_design_matrices(self.x, breakpoints)
+            pinvs = np.linalg.pinv(design_mats)
             sols = np.tensordot(pinvs, self.y, [2, 0])[..., None]
             max0_vals = np.maximum(self.x - breakpoints[:, None], 0)
             y_ests = sols[:, 0] + self.x * sols[:, 1] + max0_vals * sols[:, 2]
@@ -442,7 +567,7 @@ class SegmentedLinearModel(object):
             best_rss = rss[where_best]
             best_sol = sols[where_best].ravel()
             breakpoints = np.array([breakpoints[where_best]])
-            residuals = np.sum((coeff_mats[where_best] @ best_sol - self.y)**2)
+            residuals = np.sum((design_mats[where_best] @ best_sol - self.y)**2)
             cov_mat = (pinvs[where_best] @ pinvs[where_best].T) * residuals / (self.len_data - 4)
             best_params = (best_sol[0], best_sol[1], breakpoints, best_sol[2:3], best_sol[3:4], best_rss, cov_mat)
         try:
@@ -457,18 +582,27 @@ class SegmentedLinearModel(object):
                 best_params = params
                 best_rss = rss
 
+        # TODO Perturb the breakpoints if the best parameter values haven't been changing
+        # for some amount of iterations. Muggeo uses 3.
         for _ in range(num_bootstraps):
             bootstrap_idxs = rng.integers(low=0, high=self.len_data, size=self.len_data)
             x_bootstrap = self.x[bootstrap_idxs]
             y_bootstrap = self.y[bootstrap_idxs]
+
+            breakpoints = best_params[2]
 
             # Fit bootstrapped data.
             try:
                 params_bootstrap = self._fit(
                     best_params[2], maxiter=maxiter, tol=tol, x=x_bootstrap, y=y_bootstrap
                 )
-            except:
-                params_bootstrap = best_params
+            except Exception as e:
+                random_breakpoints = np.sort(rng.uniform(
+                    low=self.lower_breakpoint_bound,
+                    high=self.upper_breakpoint_bound,
+                    size=2
+                ))
+                params_bootstrap = [[], [], random_breakpoints]
 
             # Fit original data using parameters from bootstrap fit.
             try:
