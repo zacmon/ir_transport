@@ -924,7 +924,7 @@ class IRTransport():
 
         regression_failed = False
         # No difference in slope.
-        if np.abs(slm.max0_params[0]) < min_abs_slope_change:
+        if np.abs(slm.params[2]) < min_abs_slope_change:
             regression_failed = True
         # Breakpoint error is high.
         #elif slm.breakpoint_se[0] > slm.breakpoints[0]:
@@ -941,13 +941,12 @@ class IRTransport():
             )
 
         cluster_radius = slm.breakpoints[0]
-
         df = df.filter(
             (pl.col('dist_to_max_score') <= cluster_radius )
         ).drop(
             ('annulus_idx', 'annulus_radius', 'enrichment_above_quantile', 'dist_to_max_score')
         ).with_columns(
-            cluster_radius=cluster_radius
+            cluster_radius=pl.lit(cluster_radius, dtype=pl.Float64)
         )
 
         return df, tmp, slm
