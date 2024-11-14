@@ -942,7 +942,7 @@ class IRTransport():
 
         cluster_radius = slm.breakpoints[0]
         df = df.filter(
-            (pl.col('dist_to_max_score') <= cluster_radius )
+            (pl.col('dist_to_max_score') <= cluster_radius)
         ).drop(
             ('annulus_idx', 'annulus_radius', 'enrichment_above_quantile', 'dist_to_max_score')
         ).with_columns(

@@ -56,13 +56,12 @@ def _create_design_matrices(
     """
     x_diff_bkpts = x - breakpoints[..., None]
     max0_vals = np.maximum(x_diff_bkpts, 0)
-    indicator_vals = (x_diff_bkpts > 0).astype(np.float64)
     ones = np.ones((breakpoints.shape[0], x.shape[0], ))
     x_for_mat = np.tile(x, breakpoints.shape[0]).reshape(
         breakpoints.shape[0], x.shape[0]
     )
-    design_mats = np.hstack((ones, x_for_mat, max0_vals, indicator_vals)).reshape(
-        breakpoints.shape[0], 4, x.shape[0]
+    design_mats = np.hstack((ones, x_for_mat, max0_vals,)).reshape(
+        breakpoints.shape[0], 3, x.shape[0]
     )
     return design_mats.swapaxes(1, 2)
 
@@ -193,7 +192,7 @@ def compute_davies(
     if bounds is None:
         bounds = (x[1], x[-2])
     interval = np.linspace(bounds[0], bounds[1], n_points)
-    design_mats = _create_design_matrices(x, interval)[:, :, :3]
+    design_mats = _create_design_matrices(x, interval)
 
     df = len(x) - 3
 
@@ -468,17 +467,16 @@ class SegmentedLinearModel(object):
         # Muggeo computes final coefficients without the indicator part of the
         # design matrix. This shouldn't matter if the indicator params are close
         # to 0. However, the algorithm can converge if the indicator params are
-        # not close to 0. The residuals won't be identical to Muggeo in that case,
-        # but the breakpoints should be nearly identical.
+        # not close to 0. Thus, this is a way of implicitly checking that the
+        # indicator params -> 0.
         # TODO Match Muggeo. How does this impact indicator params estimate for
         #      computing standard errors for breakpoints?
-        #design_mat = design_mat[:, :2 + num_breakpoints]
+        design_mat = design_mat[:, :2 + num_breakpoints]
         pinv = np.linalg.pinv(design_mat)
         sol = pinv @ y
         residuals = np.sum((design_mat @ sol - y)**2)
         dof = self.len_data - design_mat.shape[1]
         cov_mat = (pinv @ pinv.T) * residuals / dof
-
         to_return = (
             sol, breakpoints, residuals, cov_mat
         )
@@ -486,13 +484,14 @@ class SegmentedLinearModel(object):
 
     def fit(
         self,
-        breakpoints: Sequence[float] = None,
+        breakpoints: Optional[Sequence[float]] = None,
         num_breakpoints: int = 1,
         maxiter: int = 30,
         tol: float = 1e-8,
         num_davies: int = 10,
-        num_bootstraps: int = 10,
         init_breakpoints: str = 'range',
+        num_bootstraps: int = 30,
+        early_stopping: Optional[int] = None,
         seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None
     ) -> None:
         """
@@ -513,8 +512,16 @@ class SegmentedLinearModel(object):
             Tolerance for convergence.
         num_davies : int, default 10
             The size of the interval used for computing the Davies test p value.
-        num_bootstraps : int, default 0
+        init_breakpoints : str, default 'range'
+            How the breakpoints should be initialized if none are provided.
+            'range': breakpoints are intialized equally across the range of x.
+            'quantile': breakpoints are initialized using quantiles of x.
+            'random': breakpoints are initialized randomly.
+        num_bootstraps : int, default 30
             The number of bootstrap inferences for escaping local minima.
+        early_stopping: int, optional
+            If this amount of iterations has the same loss, then the bootstrapping
+            local minima escape loop will end.
         seed : int or numpy.random.Generator or numpy.random.BitGenerator or numpy.random.SeedSequence, optional
             The seed for the random number generator. If None, the random number
             generator used is self.rng.
@@ -522,22 +529,40 @@ class SegmentedLinearModel(object):
         Returns
         -------
         None
+
+        References
+        ----------
+        .. [1] Muggeo V (2003) "Estimating regression models with unknown break-points."
+               Statist. Med 22(19), 3055-3071, https://doi.org/10.1002/sim.1545
+        .. [2] Wood S N (2001) "Minimizing model fitting objectives that contain
+               spurious local minima by bootstrap restarting." Biometrics 57(1),
+               240-4. https://doi.org/10.1111/j.0006-341X.2001.00240.x
         """
-        if not num_bootstraps >= 0:
-            raise ValueError('num_bootstraps must be >= 0.')
-        if num_breakpoints < 1:
-            raise ValueError('num_breakpoints must be >= 1.')
-        if int(num_breakpoints) != num_breakpoints:
-            raise TypeError('num_breakpoints must be an integer.')
+        for arg, arg_label, lowest_val in zip(
+            [num_breakpoints, maxiter, num_davies, num_bootstraps],
+            ['num_breakpoints', 'maxiter', 'num_davies', 'num_bootstraps'],
+            [1, 0, 1, 0]
+        ):
+            if int(arg) != arg:
+                raise TypeError(f'{arg_label} must be an integer.')
+            if arg < lowest_val:
+                raise ValueError(f'{arg_label} must be >= {lowest_val}.')
+
+        if tol <= 0:
+            raise ValueError('tol must be > 0.')
+
+        if early_stopping is not None:
+            if int(early_stopping) != early_stopping:
+                raise TypeError('early_stopping must be an integer')
+            if early_stopping <= 0:
+                raise ValueError('early_stopping must be >= 0.')
+        else:
+            early_stopping = np.inf
+
         if seed is not None:
             rng = np.random.default_rng(seed)
         else:
             rng = self.rng
-
-        self.davies_x, self.davies_p = compute_davies(self.x, self.y, num_davies)
-
-        best_rss = None
-        best_params = None
 
         if breakpoints is not None:
             if not hasattr(breakpoints, '__len__'):
@@ -569,6 +594,9 @@ class SegmentedLinearModel(object):
         if self.len_data <= 2 + 2 * num_breakpoints:
             raise RuntimeError('Breakpoint analysis failed. Too few datapoints.')
 
+        self.davies_x, self.davies_p = compute_davies(self.x, self.y, num_davies)
+
+        # Compute fit on initial parameters.
         params, breakpoints, residuals, cov_mat  = self._fit(
             breakpoints, num_breakpoints, maxiter, tol
         )
@@ -577,6 +605,7 @@ class SegmentedLinearModel(object):
         same_loss = 0
         tried_quantile = False
         same_loss_thresh = 3
+        # Escape local minima using Wood (2001) and Muggeo.
         for _ in range(num_bootstraps):
             bootstrap_idxs = rng.integers(low=0, high=self.len_data, size=self.len_data)
             x_bootstrap = self.x[bootstrap_idxs]
@@ -633,6 +662,8 @@ class SegmentedLinearModel(object):
                 same_loss = 0
             else:
                 same_loss += 1
+            if same_loss >= early_stopping:
+                break
 
         self.params = params
         self.breakpoints = breakpoints
