@@ -1,8 +1,9 @@
 # IRTransport
-This is a refactoring and updating of [transport](https://github.com/matsengrp/transport/tree/main) from the Matsen lab.
-
 IRTransport uses optimal transport with TCRdist as the metric to detect amino acid sequences which are enriched in one dataset compared to another nonparametrically.
 IRTransport can also use bespoke distance and neighbor-finding functions provided by the user.
+
+This is a refactoring and updating of [transport](https://github.com/matsengrp/transport/tree/main) from the Matsen lab.
+IRTransport also includes a SegmentedLinearModel class which closely resembles Vito Muggeo's [segmented R](https://cran.r-project.org/web/packages/segmented/index.html) package module for inferring breakpoints using a linear model.
 
 ## Installation
 1. Clone the repository.
@@ -22,7 +23,7 @@ I.e., we want to see which sequences from the second dataset are distinct from t
 Assume that there are the columns `'cdr3b', 'vb'` which point to the BCDR3 and TRBV gene for the TRB receptor sequence.
 
 ```python
-from ir_transport.ir_transport import IRTransport
+from ir_transport import IRTransport
 
 # Create the IRTransport class object.
 irt = IRTransport()
@@ -49,7 +50,7 @@ irt.create_clusters()
 It is also possible to compute statistics on both the sample and reference datasets in the same IRTransport object.
 
 ```python
-from ir_transport.ir_transport import IRTransport
+from ir_transport import IRTransport
 
 # Create the IRTransport class object.
 irt = IRTransport()
@@ -77,7 +78,7 @@ irt.create_clusters(dataset='reference')
 If paired-chain data is available, you can point to the columns containg the TRAV gene and ACDR3 sequence. Here we assume, they are pointed to by `'cdr3a', 'va'` (of course, this will depend on the format of your data).
 
 ```python
-from ir_transport.ir_transport import IRTransport
+from ir_transport import IRTransport
 
 # Create the TCRTransport class object. We increase the neighbor_radius from the
 # default of 48 since TCRdist will be larger for paired chain sequences.
@@ -94,4 +95,5 @@ tt.add_dataset(FILE2, seq_cols=['cdr3b', 'vb', 'cdr3a', 'va'])
 The rest of the functions are as in the single chain case.
 
 ## References
-- Olson, B.J., Schattgen, S.A., Thomas, P.G., Bradley, P. and Matsen IV, F.A., 2022. Comparing T cell receptor repertoires using optimal transport. _PLOS Computational Biology_, 18(12), p.e1010681. [https://doi.org/10.1371/journal.pcbi.1010681](https://doi.org/10.1371/journal.pcbi.1010681)
+- Olson, B.J., Schattgen, S.A., Thomas, P.G., Bradley, P. and Matsen IV, F.A. (2022). Comparing T cell receptor repertoires using optimal transport. _PLOS Computational Biology_, 18(12), p.e1010681. [https://doi.org/10.1371/journal.pcbi.1010681](https://doi.org/10.1371/journal.pcbi.1010681)
+- Muggeo V.M.R. (2003). segmented: Regression Models with Break-Points / Change-Points Estimation (with Possibly Random Effects). [https://doi.org/10.32614/CRAN.package.segmented](https://doi.org/10.32614/CRAN.package.segmented)
