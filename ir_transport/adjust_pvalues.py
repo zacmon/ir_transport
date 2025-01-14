@@ -1,21 +1,28 @@
 """This module contains multiple testing corrections for controlling the family-wise
-   error rate or the false discovery rate.
+error rate or the false discovery rate.
 """
-from typing import Any, Dict, Tuple
+
 import warnings
+from typing import Any, Dict, Tuple
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import UnivariateSpline
 
 METHODS = {
-    'bonferroni', 'sidak', 'empirical_null', 'holm', 'hommel',
-    'simes-hochberg', 'bh', 'by', 'storey'
+    "bonferroni",
+    "sidak",
+    "empirical_null",
+    "holm",
+    "hommel",
+    "simes-hochberg",
+    "bh",
+    "by",
+    "storey",
 }
 
-def is_iterable(
-    obj: Any
-) -> bool:
+
+def is_iterable(obj: Any) -> bool:
     """
     Check if input is an iterable.
 
@@ -35,12 +42,13 @@ def is_iterable(
     else:
         return True
 
+
 def estimate_fraction_null(
     pvalues: NDArray[np.float64],
     lambdas: NDArray[np.float64] = np.arange(0.05, 1, 0.05),
-    estimate_method: str = 'smoother',
+    estimate_method: str = "smoother",
     log_transform: bool = False,
-    **kwargs: Dict[str, Any]
+    **kwargs: Dict[str, Any],
 ) -> Tuple[np.float64, NDArray[np.float64], NDArray[np.float64], UnivariateSpline]:
     """
     Estimate the overall proportion of null p values.
@@ -89,10 +97,10 @@ def estimate_fraction_null(
            unified approach." J. R. Stat. Soc., B: Stat. 66: 187-205.
            https://doi.org/10.1111/j.1467-9868.2004.00439.x
     """
-    if estimate_method != 'smoother' and estimate_method != 'boostrap':
+    if estimate_method != "smoother" and estimate_method != "boostrap":
         raise ValueError(
-            f'{estimate_method} is an invalid option. estimate_method must be '
-            'either \'smoother\' or \'boostrap\'.'
+            f"{estimate_method} is an invalid option. estimate_method must be "
+            "either 'smoother' or 'boostrap'."
         )
 
     num_tests = len(pvalues)
@@ -104,18 +112,18 @@ def estimate_fraction_null(
         len_lambdas = len(lambdas)
         if len_lambdas > 1 and len_lambdas < 4:
             raise RuntimeError(
-                f'The amount of lambdas is {len_lambdas}. Either '
-                'one lambda is used or lambdas should have at least '
-                'four values.'
+                f"The amount of lambdas is {len_lambdas}. Either "
+                "one lambda is used or lambdas should have at least "
+                "four values."
             )
 
     if np.any((lambdas < 0) | (lambdas >= 1)):
-        raise ValueError('lambdas must be in [0, 1).')
+        raise ValueError("lambdas must be in [0, 1).")
 
     if np.max(pvalues) < np.max(lambdas):
         raise RuntimeError(
-            'The maximum p value is smaller than the lambda range. '
-            'Change the range of lambda.'
+            "The maximum p value is smaller than the lambda range. "
+            "Change the range of lambda."
         )
 
     if len_lambdas == 1:
@@ -128,33 +136,33 @@ def estimate_fraction_null(
         denom = num_tests * (1 - lambdas)
         pi0_ests = numer / denom
 
-        if estimate_method == 'smoother':
+        if estimate_method == "smoother":
             if log_transform:
-                spline  = UnivariateSpline(lambdas, np.log(pi0_ests), **kwargs)
+                spline = UnivariateSpline(lambdas, np.log(pi0_ests), **kwargs)
                 pi0_hat = min(np.exp(spline(lambdas[-1])), 1)
             else:
-                spline  = UnivariateSpline(lambdas, pi0_ests, **kwargs)
+                spline = UnivariateSpline(lambdas, pi0_ests, **kwargs)
                 pi0_hat = min(spline(lambdas[-1]), 1)
         else:
             spline = None
 
             quantile_p1 = np.quantile(pi0_ests, 0.1)
             mse = (
-                numer / (num_tests**2 * (1 - lambdas)**2)
-                * (1 - numer / num_tests)
-                + (pi0_ests - quantile_p1)**2
+                numer / (num_tests**2 * (1 - lambdas) ** 2) * (1 - numer / num_tests)
+                + (pi0_ests - quantile_p1) ** 2
             )
             pi0_hat = np.minimum(pi0_ests[mse == np.min(mse)], 1)[0]
 
     if pi0_hat <= 0:
         warnings.warn(
-            'The estimated probability of null p values <= 0. This '
-            'estimate is being set to 1. Check that the p values are '
-            'in [0, 1] or use a different range of lambdas.'
+            "The estimated probability of null p values <= 0. This "
+            "estimate is being set to 1. Check that the p values are "
+            "in [0, 1] or use a different range of lambdas."
         )
         pi0_hat = 1
 
     return pi0_hat, pi0_ests, lambdas, spline
+
 
 def get_adjusted_pvalues(
     pvalues: NDArray[np.floating],
@@ -162,9 +170,9 @@ def get_adjusted_pvalues(
     fraction_null: np.floating = None,
     null_pvalues: NDArray[np.floating] = None,
     lambdas: NDArray[np.floating] = np.arange(0.05, 1, 0.05),
-    estimate_method: str = 'smoother',
+    estimate_method: str = "smoother",
     log_transform: bool = False,
-    **kwargs: Dict[str, Any]
+    **kwargs: Dict[str, Any],
 ) -> NDArray[np.floating]:
     """
     Adjust p values using multiple testing corrections.
@@ -177,7 +185,7 @@ def get_adjusted_pvalues(
         An array of p values. These numbers must be in [0, 1].
     method : str
         Method using for adjusting the p values. Available methods:
-            'bonferonni' _[4]
+            'bonferroni' _[4]
             'sidak' _[5]
             'empirical_null'
             'holm' _[6]
@@ -255,10 +263,10 @@ def get_adjusted_pvalues(
             https://doi.org/10.1111/j.1467-9868.2004.00439.x
     """
     if method not in METHODS:
-        to_print = ', '.join(METHODS)
+        to_print = ", ".join(METHODS)
         raise ValueError(
-            f'{method} is an invalid method. Available methods: '
-            f'{to_print}. See documentation for further information.'
+            f"{method} is an invalid method. Available methods: "
+            f"{to_print}. See documentation for further information."
         )
 
     pvalues = np.asarray(pvalues)
@@ -267,48 +275,46 @@ def get_adjusted_pvalues(
     if np.any(gt_1):
         num_gt_1 = np.count_nonzero(gt_1)
         raise RuntimeError(
-            f'There are {num_gt_1} erroneous p values greater '
-            'than 1. p values must be in [0, 1].'
+            f"There are {num_gt_1} erroneous p values greater "
+            "than 1. p values must be in [0, 1]."
         )
 
     lt_0 = pvalues < 0
     if np.any(lt_0):
         num_lt_0 = np.count_nonzero(lt_0)
         raise RuntimeError(
-            f'There are {num_lt_0} erroneous p values less than '
-            '0. p values must be in [0, 1].'
+            f"There are {num_lt_0} erroneous p values less than "
+            "0. p values must be in [0, 1]."
         )
 
     nan_check = np.isnan(pvalues)
     if np.any(nan_check):
         num_nan = np.count_nonzero(nan_check)
-        raise RuntimeError(
-            f'There are {num_nan} erroneous p values which are nan.'
-        )
+        raise RuntimeError(f"There are {num_nan} erroneous p values which are nan.")
 
     method = method.lower()
     num_tests = len(pvalues)
 
-    if method == 'bonferroni':
+    if method == "bonferroni":
         return np.minimum(pvalues * num_tests, 1)
 
-    elif method == 'sidak':
+    elif method == "sidak":
         return -np.expm1(num_tests * np.log1p(-pvalues))
 
-    elif method == 'empirical_null':
+    elif method == "empirical_null":
         if null_pvalues is None:
-            raise RuntimeError(
-                'empirical_null cannot be used if null_pvalues is None.'
-            )
+            raise RuntimeError("empirical_null cannot be used if null_pvalues is None.")
         null_pvalues = np.asarray(null_pvalues)
 
-        if estimate_method == 'smoother':
+        if estimate_method == "smoother":
             sig_discovery = np.count_nonzero(pvalues < lambdas[:, None], axis=1)
             bkgd_discovery = np.count_nonzero(null_pvalues < lambdas[:, None], axis=1)
             false_discovery_rate = bkgd_discovery / (bkgd_discovery + sig_discovery)
 
             if log_transform:
-                spline = UnivariateSpline(lambdas, np.log(false_discovery_rate), s=0, **kwargs)
+                spline = UnivariateSpline(
+                    lambdas, np.log(false_discovery_rate), s=0, **kwargs
+                )
                 p_adj = np.exp(spline(pvalues))
             else:
                 spline = UnivariateSpline(lambdas, false_discovery_rate, s=0, **kwargs)
@@ -317,11 +323,14 @@ def get_adjusted_pvalues(
             p_adj = np.clip(p_adj, 0, 1)
             return p_adj
 
-        elif estimate_method == 'empirical':
+        elif estimate_method == "empirical":
             concat_pvalues = np.concatenate((pvalues, null_pvalues))
-            signal_labels = np.concatenate((
-                np.ones(num_tests, dtype=bool), np.zeros(len(null_pvalues), dtype=bool)
-            ))
+            signal_labels = np.concatenate(
+                (
+                    np.ones(num_tests, dtype=bool),
+                    np.zeros(len(null_pvalues), dtype=bool),
+                )
+            )
             argsort = np.argsort(concat_pvalues)
             pvalues_ascend = concat_pvalues[argsort]
             signal_labels_ascend = signal_labels[argsort]
@@ -332,9 +341,11 @@ def get_adjusted_pvalues(
             p_adj_unsrt[argsort] = p_adj
             return p_adj_unsrt[:num_tests]
         else:
-            raise ValueError(f'{estimate_method} is an invalid option. '
-                             'estimate_method must be either \'smoother\' or '
-                             '\'empirical\' when method is \'empirical_null\'.')
+            raise ValueError(
+                f"{estimate_method} is an invalid option. "
+                "estimate_method must be either 'smoother' or "
+                "'empirical' when method is 'empirical_null'."
+            )
 
     arange = np.arange(1, num_tests + 1)
 
@@ -346,10 +357,10 @@ def get_adjusted_pvalues(
         argsort = np.argsort(pvalues)
         input_sorted = False
 
-    if method == 'holm' or method == 'hommel':
+    if method == "holm" or method == "hommel":
         p_ascend = np.take(pvalues, argsort)
 
-        if method == 'holm':
+        if method == "holm":
             to_max_acc = (num_tests - arange + 1) * p_ascend
             p_adj = np.minimum(1, np.maximum.accumulate(to_max_acc))
 
@@ -367,27 +378,27 @@ def get_adjusted_pvalues(
         argsort = argsort[::-1]
         p_desc = np.take(pvalues, argsort)
 
-        if method == 'simes-hochberg':
+        if method == "simes-hochberg":
             to_min_acc = (num_tests - arange + 1) * p_desc
             p_adj = np.minimum(1, np.minimum.accumulate(to_min_acc))
 
-        elif method == 'bh':
+        elif method == "bh":
             to_min_acc = num_tests / arange * p_desc
             p_adj = np.minimum(1, np.minimum.accumulate(to_min_acc))
 
-        elif method == 'by':
+        elif method == "by":
             q = np.sum(1 / arange)
             to_min_acc = q * num_tests / arange * p_desc
             p_adj = np.minimum(1, np.minimum.accumulate(to_min_acc))
 
-        elif method == 'storey':
+        elif method == "storey":
             if fraction_null is None:
                 fraction_null = estimate_fraction_null(
                     p_desc, lambdas, estimate_method, log_transform, **kwargs
                 )[0]
             else:
                 if fraction_null <= 0 or fraction_null > 1:
-                    raise ValueError('fraction_null must be in (0, 1].')
+                    raise ValueError("fraction_null must be in (0, 1].")
             to_min_acc = num_tests / arange * fraction_null * p_desc
             p_adj = np.minimum.accumulate(to_min_acc)
 

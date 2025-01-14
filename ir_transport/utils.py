@@ -1,17 +1,26 @@
 from __future__ import annotations
+
 from typing import *
 
 import numpy as np
-from numpy.typing import NDArray
 import polars as pl
 import tcrdist_rs as tdr
+from numpy.typing import NDArray
+
 
 def load_data(
-    data: str | Dict[str, Any] | Sequence | np.ndarray | pl.Series | pd.DataFrame | pl.DataFrame,
+    data: str
+    | Dict[str, Any]
+    | Sequence
+    | np.ndarray
+    | pl.Series
+    | pd.DataFrame
+    | pl.DataFrame,
     seq_cols: str | Sequence[str],
     v_cols: str | Sequence[str] = None,
     collapse: Optional[str] = None,
-    **kwargs
+    input_source_type: str = "csv",
+    **kwargs,
 ) -> pl.DataFrame:
     """
     Load the data into a polars.DataFrame and perform some preprocessing and filtering.
@@ -29,21 +38,23 @@ def load_data(
     collapse : str, optional
         If 'allele', the V genes have the allele information removed. If 'subfamily',
         the gene subfamily information is removed from the V annotation.
+    input_source_type : str, default 'csv'
+        The type of source that will be read by polars. E.g., 'csv', 'parquet',
+        'excel', 'json'. See https://docs.pola.rs/api/python/stable/reference/io.html
+        for acceptable input source types (i.e., any suffix after 'read' functions).
     **kwargs : dict of {str : any}
-        Keyword arguments to polars.read_csv if data is a string or keyword arguments
-        to polars.DataFrame if data is not a string.
+        Keyword arguments to polars.read_{input_source_type} if data is a string
+        or keyword arguments to polars.DataFrame if data is not a string.
 
     Returns
     -------
     df : polars.DataFrame
-        A DataFrame containing the deduplicated sequence.
+        A DataFrame containing the deduplicated sequences.
     """
-    if collapse is not None and collapse not in {'allele', 'subfamily'}:
-        raise ValueError(
-            'collapse must be \'allele\' or \'subfamily\'.'
-        )
+    if collapse is not None and collapse not in {"allele", "subfamily"}:
+        raise ValueError("collapse must be 'allele' or 'subfamily' or None.")
     if isinstance(data, str):
-        df = pl.read_csv(data, **kwargs)
+        df = getattr(pl, f"read_{input_source_type}")(data, **kwargs)
     elif isinstance(data, pl.DataFrame):
         df = data
     else:
@@ -57,55 +68,48 @@ def load_data(
     # Ensure seq columns contain valid amino acids only.
     num_invalid_seqs = df.select(
         res=pl.sum_horizontal(
-            ~pl.col(seq_cols).str.contains('^[ACDEFGHIKLMNPQRSTVWY~_\*]+$').all()
+            ~pl.col(seq_cols).str.contains(r"^[ACDEFGHIKLMNPQRSTVWY~_\*]+$").all()
         )
-    )['res'].item(0)
+    )["res"].item(0)
 
     if num_invalid_seqs > 0:
         raise RuntimeError(
-            f'The column(s) pointed to by {seq_cols} contains invalid amino acid '
-            'characters.'
+            f"The column(s) pointed to by {seq_cols} contains invalid amino acid "
+            "characters."
         )
 
     if collapse is not None:
         if v_cols is None:
-            raise RuntimeError(
-                'v_cols must not be None if collapse it not None'
-            )
+            raise RuntimeError("v_cols must not be None if collapse is not None.")
         new_cols = {
-            col: pl.col(col).str.replace_all(r'\*[0-9]+', '')
-            for col in v_cols if col is not None
+            col: pl.col(col).str.replace_all(r"\*[0-9]+", "")
+            for col in v_cols
+            if col is not None
         }
-        df = df.with_columns(
-            **new_cols
-        )
-        if collapse == 'subfamily':
+        df = df.with_columns(**new_cols)
+        if collapse == "subfamily":
             new_cols = {
-                col: pl.col(col).str.replace_all(r'\-[0-9]+', '')
-                for col in v_cols if col is not None
+                col: pl.col(col).str.replace_all(r"\-[0-9]+", "")
+                for col in v_cols
+                if col is not None
             }
-            df = df.with_columns(
-                **new_cols
-            )
+            df = df.with_columns(**new_cols)
 
     if v_cols is not None:
         grp_cols = list(v_cols) + list(seq_cols)
     else:
         grp_cols = seq_cols
 
-    df = df.group_by(
-        grp_cols
-    ).agg(
-        multiplicity=pl.len()
-    )
+    df = df.group_by(grp_cols).agg(multiplicity=pl.len())
 
     return df
+
 
 def compute_distances(
     seqs: NDArray[str],
     seqs_comp: Optional[NDArray[str]] = None,
-    distance: str = 'tcrdist',
-    species: str = 'human',
+    distance: str = "tcrdist",
+    species: str = "human",
 ) -> NDArray[np.uint16]:
     """
     Compute the distances within a dataset of sequences or between two datasets.
@@ -128,38 +132,34 @@ def compute_distances(
     """
     # TODO Add support for mice.
     # TODO Add support for CDR1, CDR2, CDR3 computations.
-    if distance == 'tcrdist':
+    if distance == "tcrdist":
         if seqs.ndim == 1:
-            dist_func = 'tcrdist'
+            dist_func = "tcrdist"
         elif seqs.shape[1] == 2:
-            dist_func = 'tcrdist_gene'
+            dist_func = "tcrdist_gene"
         else:
-            dist_func = 'tcrdist_paired_gene'
+            dist_func = "tcrdist_paired_gene"
     else:
         dist_func = distance
 
     if seqs_comp is not None:
-        func_suffix = '_many_to_many'
+        func_suffix = "_many_to_many"
         return np.fromiter(
-            getattr(tdr, dist_func + func_suffix)(
-                seqs, seqs_comp, parallel=True
-            ), dtype=np.uint16
-        ).reshape(
-            seqs.shape[0], seqs_comp.shape[0]
-        )
+            getattr(tdr, dist_func + func_suffix)(seqs, seqs_comp, parallel=True),
+            dtype=np.uint16,
+        ).reshape(seqs.shape[0], seqs_comp.shape[0])
     else:
-        func_suffix = '_matrix'
+        func_suffix = "_matrix"
         return np.fromiter(
-            getattr(tdr, dist_func + func_suffix)(
-                seqs, parallel=True
-            ), dtype=np.uint16
+            getattr(tdr, dist_func + func_suffix)(seqs, parallel=True), dtype=np.uint16
         )
+
 
 def get_neighbor_map(
     seqs: NDArray[str],
     neighbor_radius: int,
-    distance: str = 'tcrdist',
-    species: str = 'human',
+    distance: str = "tcrdist",
+    species: str = "human",
 ) -> pl.DataFrame:
     """
     Return a DataFrame containing the indices of sequences which are neighbors
@@ -183,46 +183,37 @@ def get_neighbor_map(
     # TODO Add support for mice.
     # TODO Add support for tcrdist, no gene, computations.
     # TODO Add support for CDR1, CDR2, CDR3 computations.
-    if distance == 'tcrdist':
+    if distance == "tcrdist":
         if seqs.ndim == 1:
-            dist_func = 'tcrdist'
+            dist_func = "tcrdist"
         elif seqs.shape[1] == 2:
-            dist_func = 'tcrdist_gene'
+            dist_func = "tcrdist_gene"
         else:
-            dist_func = 'tcrdist_paired_gene'
+            dist_func = "tcrdist_paired_gene"
     else:
         dist_func = distance
 
-    func_suffix = '_neighbor_matrix'
+    func_suffix = "_neighbor_matrix"
 
     neighbors = getattr(tdr, dist_func + func_suffix)(
         seqs, neighbor_radius, parallel=True
     )
 
     df_neighbors = pl.DataFrame(
-        neighbors, schema=['index', 'n_index', 'dist'], orient='row',
-        schema_overrides={
-            'index': pl.UInt32, 'n_index': pl.UInt32, 'dist': pl.UInt16
-        }
+        neighbors,
+        schema=["index", "n_index", "dist"],
+        orient="row",
+        schema_overrides={"index": pl.UInt32, "n_index": pl.UInt32, "dist": pl.UInt16},
     )
 
-    # Concatenate the index and n_index reversed to get all neighbors.
-    df_neighbors = pl.concat((
-        df_neighbors,
-        df_neighbors.select(
-            ['n_index', 'index', 'dist']
-        ).rename({
-            'n_index': 'index', 'index': 'n_index'
-        })
-    ))
-
     return df_neighbors
+
 
 def square_indices_to_condensed_idx(
     rows: NDArray[np.integer],
     cols: NDArray[np.integer],
     n: int,
-    dtype: str | type = np.int32
+    dtype: str | type = np.int32,
 ) -> NDArray[np.integer]:
     """
     Map indices from a symmetric square matrix to a condensed vectorform, i.e., the upper
@@ -253,10 +244,9 @@ def square_indices_to_condensed_idx(
 
     return (n * rows - rows * (rows + 1) // 2 + cols - 1 - rows).astype(dtype)
 
+
 def condensed_idx_to_square_indices(
-    idxs: NDArray[np.integer],
-    n: int,
-    dtype: str | type = np.int32
+    idxs: NDArray[np.integer], n: int, dtype: str | type = np.int32
 ):
     """
     Map indices from a vectorform of the upper right triangular matrix to its
@@ -281,10 +271,11 @@ def condensed_idx_to_square_indices(
     col_idxs : numpy.ndarray of numpy.integer
         The mapped column indices in the full square matrix.
     """
-    row_idxs = np.ceil(0.5 * (2 * n - 1 - (4 * (n**2 - n - 2 * idxs) - 7)**0.5) - 1)
+    row_idxs = np.ceil(0.5 * (2 * n - 1 - (4 * (n**2 - n - 2 * idxs) - 7) ** 0.5) - 1)
     row_idxs_p1 = row_idxs + 1
-    col_idxs = n + idxs - (
-        row_idxs_p1 * (n - 1 - row_idxs_p1)
-        + (row_idxs_p1 * (row_idxs_p1 + 1)) // 2
+    col_idxs = (
+        n
+        + idxs
+        - (row_idxs_p1 * (n - 1 - row_idxs_p1) + (row_idxs_p1 * (row_idxs_p1 + 1)) // 2)
     )
     return row_idxs.astype(dtype), col_idxs.astype(dtype)

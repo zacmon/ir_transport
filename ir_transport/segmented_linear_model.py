@@ -2,8 +2,9 @@ from typing import *
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.special import factorial, stdtr
 from scipy.optimize import minimize_scalar
+from scipy.special import factorial, stdtr
+
 
 def preprocess_input(
     x: Sequence[float],
@@ -28,12 +29,11 @@ def preprocess_input(
     y = np.asarray(y)
 
     if len(x) != len(y):
-        raise RuntimeError(
-            'x and y must have the same length.'
-        )
+        raise RuntimeError("x and y must have the same length.")
 
     mask_finite = np.isfinite(x) & np.isfinite(y)
     return x[mask_finite], y[mask_finite]
+
 
 def _create_design_matrices(
     x: NDArray[np.float64],
@@ -56,14 +56,24 @@ def _create_design_matrices(
     """
     x_diff_bkpts = x - breakpoints[..., None]
     max0_vals = np.maximum(x_diff_bkpts, 0)
-    ones = np.ones((breakpoints.shape[0], x.shape[0], ))
+    ones = np.ones(
+        (
+            breakpoints.shape[0],
+            x.shape[0],
+        )
+    )
     x_for_mat = np.tile(x, breakpoints.shape[0]).reshape(
         breakpoints.shape[0], x.shape[0]
     )
-    design_mats = np.hstack((ones, x_for_mat, max0_vals,)).reshape(
-        breakpoints.shape[0], 3, x.shape[0]
-    )
+    design_mats = np.hstack(
+        (
+            ones,
+            x_for_mat,
+            max0_vals,
+        )
+    ).reshape(breakpoints.shape[0], 3, x.shape[0])
     return design_mats.swapaxes(1, 2)
+
 
 def _evaluate(
     x: Sequence[float],
@@ -89,19 +99,21 @@ def _evaluate(
     """
     x = np.asarray(x)
     max0_vals = np.maximum(x - breakpoints[:, None], 0)
-    return params[0] + params[1] * x + np.sum(max0_vals * params[2:len(breakpoints) + 2, None], 0)
+    return (
+        params[0]
+        + params[1] * x
+        + np.sum(max0_vals * params[2 : len(breakpoints) + 2, None], 0)
+    )
+
 
 # TODO Actually report this.
 def compute_r_squared(
-    y: NDArray[np.float64],
-    y_est: NDArray[np.float64],
-    num_params: int
+    y: NDArray[np.float64], y_est: NDArray[np.float64], num_params: int
 ) -> Tuple[np.float64]:
-    """
-    """
+    """ """
     y_mean = np.mean(y)
-    total_sum_squares = np.sum((y - y_mean)**2)
-    residual_sum_squares = np.sum((y - y_est)**2)
+    total_sum_squares = np.sum((y - y_mean) ** 2)
+    residual_sum_squares = np.sum((y - y_est) ** 2)
     r_squared = 1 - residual_sum_squares / total_sum_squares
 
     num_data = len(y)
@@ -109,6 +121,7 @@ def compute_r_squared(
     adj_r_squared = 1 - (1 - r_squared) * coef
 
     return residual_sum_squares, total_sum_squares, r_squared, adj_r_squared
+
 
 def compute_standard_errors(
     params: NDArray[np.float64],
@@ -133,18 +146,21 @@ def compute_standard_errors(
     variances = np.diagonal(cov_mat)
 
     intercept_se = np.sqrt(variances[0])
-    max0_var = variances[2:num_breakpoints + 2]
+    max0_var = variances[2 : num_breakpoints + 2]
     max0_se = np.sqrt(max0_var)
 
-    indicator_var = variances[2 + num_breakpoints:]
-    max0_params = params[2:num_breakpoints + 2]
-    ratio = params[2 + num_breakpoints:] / max0_params
+    indicator_var = variances[2 + num_breakpoints :]
+    max0_params = params[2 : num_breakpoints + 2]
+    ratio = params[2 + num_breakpoints :] / max0_params
     idxs = np.arange(0, num_breakpoints)
-    breakpoint_se = np.sqrt((
-        indicator_var
-        + max0_var * ratio**2
-        - 2 * cov_mat[idxs + 2, idxs + 2 + num_breakpoints] * ratio
-    ) / max0_params**2)
+    breakpoint_se = np.sqrt(
+        (
+            indicator_var
+            + max0_var * ratio**2
+            - 2 * cov_mat[idxs + 2, idxs + 2 + num_breakpoints] * ratio
+        )
+        / max0_params**2
+    )
 
     slope_se = np.sqrt(
         [np.sum(cov_mat[1:k, 1:k]) for k in range(2, 3 + num_breakpoints)]
@@ -152,12 +168,13 @@ def compute_standard_errors(
 
     return intercept_se, slope_se, max0_se, breakpoint_se
 
+
 def compute_davies(
     x: NDArray[np.float64],
     y: NDArray[np.float64],
     n_points: int = 10,
     bounds: Optional[Sequence[np.float64]] = None,
-    alternative: str = 'two-sided',
+    alternative: str = "two-sided",
 ) -> Tuple[np.float64]:
     """
     Compute the Davies statistic and p value to determine if there is evidence
@@ -198,29 +215,29 @@ def compute_davies(
 
     pinvs = np.linalg.pinv(design_mats)
     sols = np.tensordot(pinvs, y, [2, 0])
-    y_ests = np.einsum('ijk,ik->ij', design_mats, sols)
-    residuals = np.sum((y_ests - y)**2, 1)
-    cov_mats = np.einsum('ijk,ilk->ijl', pinvs, pinvs)
+    y_ests = np.einsum("ijk,ik->ij", design_mats, sols)
+    residuals = np.sum((y_ests - y) ** 2, 1)
+    cov_mats = np.einsum("ijk,ilk->ijl", pinvs, pinvs)
     max0_param_se = np.sqrt(cov_mats[:, 2, 2] * residuals / df)
 
     # Eq. 4, Davies (2002).
     stats = sols[:, 2] / max0_param_se
 
     # Eq. 5, Davies (2002).
-    z_sq = sols[:, 2]**2 / cov_mats[:, 2, 2]
+    z_sq = sols[:, 2] ** 2 / cov_mats[:, 2, 2]
     beta_analogue = z_sq / (z_sq + residuals)
 
     # Total variation (between Eq. 11 and Eq. 12 in Davies (2002)).
     v = np.abs(np.diff(np.arcsin(beta_analogue**0.5))).sum()
 
     # Follow Muggeo in davies.test.r in R segmented package.
-    if alternative == 'two-sided':
+    if alternative == "two-sided":
         abs_stats = np.abs(stats)
         argbest = np.argmax(abs_stats)
         stat = abs_stats[argbest]
         x_best = interval[argbest]
         p = 1 - stdtr(df, stat)
-    elif alternative == 'less':
+    elif alternative == "less":
         argbest = np.argmin(stats)
         stat = stats[argbest]
         x_best = interval[argbest]
@@ -233,25 +250,27 @@ def compute_davies(
         p = 1 - stdtr(df, stat)
 
     # u and adjustment defined after Eq. 12 in Davies (2002).
-    u = stat**2  / (df + stat**2)
+    u = stat**2 / (df + stat**2)
     adjustment = (
-        v * (1 - u)**((df - 1) * 0.5)
+        v
+        * (1 - u) ** ((df - 1) * 0.5)
         * factorial(df / 2 - 0.5)
         / (2 * factorial(df / 2 - 1) * np.pi**0.5)
     )
     p = p + adjustment
 
-    if alternative == 'two-sided':
+    if alternative == "two-sided":
         p *= 2
 
     return x_best, np.minimum(p, 1)
+
 
 def search_min(
     momentum: np.float64,
     new_breakpoints: NDArray[np.float64],
     old_breakpoints: NDArray[np.float64],
     ones_x_mat: NDArray[np.float64],
-    y: NDArray[np.float64]
+    y: NDArray[np.float64],
 ) -> np.float64:
     """
     Return the segmented linear loss for a given momentum.
@@ -283,17 +302,22 @@ def search_min(
     pinv = np.linalg.pinv(design_mat.T)
     sol = pinv @ y
     y_ests = design_mat.T @ sol
-    return np.sum((y - y_ests)**2)
+    return np.sum((y - y_ests) ** 2)
 
-class SegmentedLinearModel(object):
+
+class SegmentedLinearModel:
     """
     Class to fit piecewise linear models by inferring breakpoints.
     """
+
     def __init__(
         self,
         x: Sequence[float],
         y: Sequence[float],
-        seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None
+        seed: int
+        | np.random.Generator
+        | np.random.BitGenerator
+        | np.random.SeedSequence = None,
     ) -> None:
         """
         Initialize a SegmentedLinearModel object.
@@ -377,30 +401,25 @@ class SegmentedLinearModel(object):
             x_min = x.min()
             x_max = x.max()
         elif x is not None and y is None:
-            raise RuntimeError(
-                'If x is given, y must be given too.'
-            )
+            raise RuntimeError("If x is given, y must be given too.")
         else:
-            raise RuntimeError(
-                'If y is given, x must be given too.'
-            )
-
+            raise RuntimeError("If y is given, x must be given too.")
 
         breakpoint_min = np.min(breakpoints)
         breakpoint_max = np.max(breakpoints)
         if breakpoint_min <= x_min:
             raise RuntimeError(
-                'Breakpoint analysis failed. The minimum breakpoint '
-                f'({breakpoint_min}) is at or below the minimum x '
-                f'({x_min}). Ensure that the minimum initial guess is in '
-                '(x_min, x_max).'
+                "Breakpoint analysis failed. The minimum breakpoint "
+                f"({breakpoint_min}) is at or below the minimum x "
+                f"({x_min}). Ensure that the minimum initial guess is in "
+                "(x_min, x_max)."
             )
         if breakpoint_max >= x_max:
             raise RuntimeError(
-                'Breakpoint analysis failed. The maximum breakpoint '
-                f'({breakpoint_min:.3g}) is at or beyond the maximum  x '
-                f'({x_max:.3g}). Ensure that the minimum initial guess is in '
-                '(x_min, x_max).'
+                "Breakpoint analysis failed. The maximum breakpoint "
+                f"({breakpoint_min:.3g}) is at or beyond the maximum  x "
+                f"({x_max:.3g}). Ensure that the minimum initial guess is in "
+                "(x_min, x_max)."
             )
 
         num_breakpoints = len(breakpoints)
@@ -411,41 +430,47 @@ class SegmentedLinearModel(object):
         design_mat = np.vstack((ones_x_mat, max0_vals)).T
         pinv = np.linalg.pinv(design_mat)
         sol = pinv @ y
-        rss = np.sum(((design_mat @ sol) - y)**2)
+        rss = np.sum(((design_mat @ sol) - y) ** 2)
 
-        design_mat = np.vstack((
-            ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64)
-        )).T
+        design_mat = np.vstack(
+            (ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64))
+        ).T
         for _ in range(maxiter):
             pinv = np.linalg.pinv(design_mat)
             sol = pinv @ y
             intercept, slope = sol[0:2]
-            max0_params = sol[2:2 + num_breakpoints]
+            max0_params = sol[2 : 2 + num_breakpoints]
 
-            indicator_params = sol[2 + num_breakpoints:]
+            indicator_params = sol[2 + num_breakpoints :]
 
             if np.isclose(0, sol[2:]).any():
                 raise RuntimeError(
-                    'At least one segmented linear model parameter is close to 0. '
-                    'Are too many breakpoints being estimated? Is there enough '
-                    'evidence for breakpoints in the data?'
+                    "At least one segmented linear model parameter is close to 0. "
+                    "Are too many breakpoints being estimated? Is there enough "
+                    "evidence for breakpoints in the data?"
                 )
             delta = indicator_params / max0_params
 
             new_breakpoints = breakpoints - h * delta
             new_breakpoints = np.clip(
-                new_breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
+                new_breakpoints,
+                self.lower_breakpoint_bound,
+                self.upper_breakpoint_bound,
             )
 
             # Although not in Muggeo (2003), the optimal momentum is computed
             # using the updated breakpoints and the previous breakpoints.
             res = minimize_scalar(
-                search_min, bracket=(0, 1), bounds=(0, 1),
-                args=(new_breakpoints, breakpoints, ones_x_mat, y)
+                search_min,
+                bracket=(0, 1),
+                bounds=(0, 1),
+                args=(new_breakpoints, breakpoints, ones_x_mat, y),
             )
             opt_momentum = res.x
             res_loss = res.fun
-            breakpoints = opt_momentum * new_breakpoints + (1 - opt_momentum) * breakpoints
+            breakpoints = (
+                opt_momentum * new_breakpoints + (1 - opt_momentum) * breakpoints
+            )
             breakpoints = np.clip(
                 breakpoints, self.lower_breakpoint_bound, self.upper_breakpoint_bound
             )
@@ -457,9 +482,9 @@ class SegmentedLinearModel(object):
 
             x_diff_bkpts = x - breakpoints[:, None]
             max0_vals = np.maximum(x_diff_bkpts, 0)
-            design_mat = np.vstack((
-                ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64)
-            )).T
+            design_mat = np.vstack(
+                (ones_x_mat, max0_vals, (max0_vals > 0).astype(np.float64))
+            ).T
 
             if epsilon < tol:
                 break
@@ -471,15 +496,13 @@ class SegmentedLinearModel(object):
         # indicator params -> 0.
         # TODO Match Muggeo. How does this impact indicator params estimate for
         #      computing standard errors for breakpoints?
-        design_mat = design_mat[:, :2 + num_breakpoints]
+        design_mat = design_mat[:, : 2 + num_breakpoints]
         pinv = np.linalg.pinv(design_mat)
         sol = pinv @ y
-        residuals = np.sum((design_mat @ sol - y)**2)
+        residuals = np.sum((design_mat @ sol - y) ** 2)
         dof = self.len_data - design_mat.shape[1]
         cov_mat = (pinv @ pinv.T) * residuals / dof
-        to_return = (
-            sol, breakpoints, residuals, cov_mat
-        )
+        to_return = (sol, breakpoints, residuals, cov_mat)
         return to_return
 
     def fit(
@@ -489,10 +512,13 @@ class SegmentedLinearModel(object):
         maxiter: int = 30,
         tol: float = 1e-8,
         num_davies: int = 10,
-        init_breakpoints: str = 'range',
+        init_breakpoints: str = "range",
         num_bootstraps: int = 30,
         early_stopping: Optional[int] = None,
-        seed: int | np.random.Generator | np.random.BitGenerator | np.random.SeedSequence = None
+        seed: int
+        | np.random.Generator
+        | np.random.BitGenerator
+        | np.random.SeedSequence = None,
     ) -> None:
         """
         Fit a segmented linear model to the data with the option of using bootstraps
@@ -540,22 +566,22 @@ class SegmentedLinearModel(object):
         """
         for arg, arg_label, lowest_val in zip(
             [num_breakpoints, maxiter, num_davies, num_bootstraps],
-            ['num_breakpoints', 'maxiter', 'num_davies', 'num_bootstraps'],
-            [1, 0, 1, 0]
+            ["num_breakpoints", "maxiter", "num_davies", "num_bootstraps"],
+            [1, 0, 1, 0],
         ):
             if int(arg) != arg:
-                raise TypeError(f'{arg_label} must be an integer.')
+                raise TypeError(f"{arg_label} must be an integer.")
             if arg < lowest_val:
-                raise ValueError(f'{arg_label} must be >= {lowest_val}.')
+                raise ValueError(f"{arg_label} must be >= {lowest_val}.")
 
         if tol <= 0:
-            raise ValueError('tol must be > 0.')
+            raise ValueError("tol must be > 0.")
 
         if early_stopping is not None:
             if int(early_stopping) != early_stopping:
-                raise TypeError('early_stopping must be an integer')
+                raise TypeError("early_stopping must be an integer")
             if early_stopping <= 0:
-                raise ValueError('early_stopping must be >= 0.')
+                raise ValueError("early_stopping must be >= 0.")
         else:
             early_stopping = np.inf
 
@@ -565,39 +591,37 @@ class SegmentedLinearModel(object):
             rng = self.rng
 
         if breakpoints is not None:
-            if not hasattr(breakpoints, '__len__'):
+            if not hasattr(breakpoints, "__len__"):
                 breakpoints = [breakpoints]
             breakpoints = np.sort(np.asarray(breakpoints))
             num_breakpoints = len(breakpoints)
         else:
-            if init_breakpoints == 'quantile':
+            if init_breakpoints == "quantile":
                 breakpoints = np.linspace(0, 1, 2 + num_breakpoints)[1:-1]
-            elif init_breakpoints == 'range':
-                breakpoints = (
-                    self.x_min + (self.x_max - self.x_min)
-                    * np.arange(1, num_breakpoints + 1) / (num_breakpoints + 1)
-                )
-            elif init_breakpoints == 'random':
+            elif init_breakpoints == "range":
+                breakpoints = self.x_min + (self.x_max - self.x_min) * np.arange(
+                    1, num_breakpoints + 1
+                ) / (num_breakpoints + 1)
+            elif init_breakpoints == "random":
                 breakpoints = np.sort(
                     rng.uniform(
                         low=self.lower_breakpoint_bound,
                         high=self.upper_breakpoint_bound,
-                        size=num_breakpoints
+                        size=num_breakpoints,
                     )
                 )
             else:
                 raise ValueError(
-                    'init_breakpoints must be \'quantile\', \'range\', or '
-                    '\'random\'.'
+                    "init_breakpoints must be 'quantile', 'range', or 'random'."
                 )
 
         if self.len_data <= 2 + 2 * num_breakpoints:
-            raise RuntimeError('Breakpoint analysis failed. Too few datapoints.')
+            raise RuntimeError("Breakpoint analysis failed. Too few datapoints.")
 
         self.davies_x, self.davies_p = compute_davies(self.x, self.y, num_davies)
 
         # Compute fit on initial parameters.
-        params, breakpoints, residuals, cov_mat  = self._fit(
+        params, breakpoints, residuals, cov_mat = self._fit(
             breakpoints, num_breakpoints, maxiter, tol
         )
 
@@ -618,39 +642,57 @@ class SegmentedLinearModel(object):
                 if same_loss >= same_loss_thresh:
                     if not tried_quantile:
                         # Muggeo uses breakpoints obtained from quantiles.
-                        breakpoint_quantiles = np.mean(breakpoints[:, None] >= self.x, axis=1)
-                        breakpoint_quantiles[np.abs(breakpoint_quantiles - 0.5) < 0.1] = alpha
+                        breakpoint_quantiles = np.mean(
+                            breakpoints[:, None] >= self.x, axis=1
+                        )
+                        breakpoint_quantiles[
+                            np.abs(breakpoint_quantiles - 0.5) < 0.1
+                        ] = alpha
                         alpha = 1 - alpha
-                        breakpoints_to_try = np.sort(np.quantile(self.x, 1 - breakpoint_quantiles))
+                        breakpoints_to_try = np.sort(
+                            np.quantile(self.x, 1 - breakpoint_quantiles)
+                        )
                         tried_quantile = True
                     else:
                         # Once the quantile method is tried, use random breakpoints
                         # to try escaping local minima further.
-                        breakpoints_to_try = np.sort(rng.uniform(
-                            low=self.lower_breakpoint_bound,
-                            high=self.upper_breakpoint_bound,
-                            size=num_breakpoints
-                        ))
+                        breakpoints_to_try = np.sort(
+                            rng.uniform(
+                                low=self.lower_breakpoint_bound,
+                                high=self.upper_breakpoint_bound,
+                                size=num_breakpoints,
+                            )
+                        )
                     _, breakpoints_boot, _, _ = self._fit(
-                        breakpoints_to_try, maxiter=maxiter, tol=tol, x=x_bootstrap, y=y_bootstrap
+                        breakpoints_to_try,
+                        maxiter=maxiter,
+                        tol=tol,
+                        x=x_bootstrap,
+                        y=y_bootstrap,
                     )
                 else:
                     _, breakpoints_boot, _, _ = self._fit(
-                        breakpoints, maxiter=maxiter, tol=tol, x=x_bootstrap, y=y_bootstrap
+                        breakpoints,
+                        maxiter=maxiter,
+                        tol=tol,
+                        x=x_bootstrap,
+                        y=y_bootstrap,
                     )
-            except Exception as e:
-                breakpoints_boot = np.sort(rng.uniform(
-                    low=self.lower_breakpoint_bound,
-                    high=self.upper_breakpoint_bound,
-                    size=num_breakpoints
-                ))
+            except Exception:
+                breakpoints_boot = np.sort(
+                    rng.uniform(
+                        low=self.lower_breakpoint_bound,
+                        high=self.upper_breakpoint_bound,
+                        size=num_breakpoints,
+                    )
+                )
 
             # Fit original data using parameters from bootstrap fit.
             try:
                 new_params, new_breakpoints, new_residuals, new_cov_mat = self._fit(
                     breakpoints_boot, maxiter=maxiter, tol=tol
                 )
-            except Exception as e:
+            except Exception:
                 same_loss += 1
                 continue
 
@@ -670,15 +712,11 @@ class SegmentedLinearModel(object):
         self.residuals = residuals
         self.cov_mat = cov_mat
 
-        (self.intercept_se, self.slope_se,
-         self.max0_se, self.breakpoint_se) = compute_standard_errors(
-             self.params, self.cov_mat
-         )
+        (self.intercept_se, self.slope_se, self.max0_se, self.breakpoint_se) = (
+            compute_standard_errors(self.params, self.cov_mat)
+        )
 
-    def evaluate(
-        self,
-        x: Sequence[float]
-    ) -> NDArray[np.float64]:
+    def evaluate(self, x: Sequence[float]) -> NDArray[np.float64]:
         """
         Compute an estimate of y for the given x using the fitted parameters.
 
@@ -694,9 +732,7 @@ class SegmentedLinearModel(object):
         """
         return _evaluate(x, self.params, self.breakpoints)
 
-    def print_segmented_input(
-        self
-    ) -> None:
+    def print_segmented_input(self) -> None:
         """
         Print statements to screen for running R segmented package.
 
@@ -711,11 +747,11 @@ class SegmentedLinearModel(object):
         -------
         None
         """
-        to_print = 'library(\'segmented\')\n'
-        to_print += 'x <- c(' + str(list(self.x))[1:-1] + ')\n'
-        to_print += 'y <- c(' + str(list(self.y))[1:-1] + ')\n'
-        to_print += 'lm_fit <- lm(y~x, data=list(x, y))\n'
-        to_print += 's <- segmented(lm_fit, npsi=1)\n'
-        to_print += 'summary(s)\n' + 'davies.test(lm_fit)\n'
-        to_print += 'sum(s$residual^2)\n'
+        to_print = "library('segmented')\n"
+        to_print += "x <- c(" + str(list(self.x))[1:-1] + ")\n"
+        to_print += "y <- c(" + str(list(self.y))[1:-1] + ")\n"
+        to_print += "lm_fit <- lm(y~x, data=list(x, y))\n"
+        to_print += "s <- segmented(lm_fit, npsi=1)\n"
+        to_print += "summary(s)\n" + "davies.test(lm_fit)\n"
+        to_print += "sum(s$residual^2)\n"
         print(to_print)
