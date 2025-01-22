@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from typing import *
+from typing import TYPE_CHECKING
 
 import numpy as np
 import polars as pl
 import tcrdist_rs as tdr
-from numpy.typing import NDArray
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 def load_data(
@@ -52,7 +55,8 @@ def load_data(
         A DataFrame containing the deduplicated sequences.
     """
     if collapse is not None and collapse not in {"allele", "subfamily"}:
-        raise ValueError("collapse must be 'allele' or 'subfamily' or None.")
+        msg = "collapse must be 'allele' or 'subfamily' or None."
+        raise ValueError(msg)
     if isinstance(data, str):
         df = getattr(pl, f"read_{input_source_type}")(data, **kwargs)
     elif isinstance(data, pl.DataFrame):
@@ -73,14 +77,16 @@ def load_data(
     )["res"].item(0)
 
     if num_invalid_seqs > 0:
-        raise RuntimeError(
+        msg = (
             f"The column(s) pointed to by {seq_cols} contains invalid amino acid "
             "characters."
         )
+        raise RuntimeError(msg)
 
     if collapse is not None:
         if v_cols is None:
-            raise RuntimeError("v_cols must not be None if collapse is not None.")
+            msg = "v_cols must not be None if collapse is not None."
+            raise RuntimeError(msg)
         new_cols = {
             col: pl.col(col).str.replace_all(r"\*[0-9]+", "")
             for col in v_cols

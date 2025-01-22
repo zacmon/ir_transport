@@ -102,9 +102,9 @@ def compute_enrichments(
     df: pl.DataFrame,
     effort_matrix: NDArray[np.float64],
     neighbor_map: pl.DataFrame,
+    max_distance: float,
     index_col: str = "index",
     neighbor_index_col: str = "n_index",
-    max_distance: float = 200,
     axis: int = 0,
     no_neighbors: bool = False,
 ) -> pl.DataFrame:
@@ -121,12 +121,12 @@ def compute_enrichments(
     neighbor_map : polars.DataFrame
         DataFrame containing the indices of the sequences with neighbors, the indices
         of the neighbors, and the distances between the two.
+    max_distance : float
+        The maximum distance which was used for scaling when inferring the optimal
+        transport map.
     index_col : str, default 'index'
         The column common to df and neighbor_map used to join the two for adding in
         neighbor enrichments and counts.
-    max_distance : float, default 200
-        The maximum distance which was used for scaling when inferring the optimal
-        transport map.
     axis : int, default 0
         The axis along which the effort matrix will be summed to compute a sequence's
         loneliness. If axis = 0, then the effort matrix along axis 1 should have the
@@ -215,7 +215,7 @@ class IRTransport:
         species: str = "human",
         distribution_type: str = "uniform",
         lambd: float = 0.01,
-        max_distance: float = 200,
+        max_cluster_distance: float = 200,
         neighbor_radius: int = 48,
         distance_func: str | Callable = "tcrdist",
         neighbor_func: Optional[Callable] = None,
@@ -237,7 +237,7 @@ class IRTransport:
             How the mass distributions of a dataset should be computed.
         lambd : float, 0.01
             The regularization weight for the Sinkhorn solver.
-        max_distance : float, default 200
+        max_cluster_distance : float, default 200
             The maximum distance for inferring clusters of enriched sequences.
             Additionally, this value is used to scale the distance matrix when
             inferring an optimal transport map.
@@ -263,7 +263,7 @@ class IRTransport:
             )
         self.distribution_type = distribution_type
         self.lambd = lambd
-        self.max_distance = max_distance
+        self.max_cluster_distance = max_cluster_distance
         self.neighbor_radius = neighbor_radius
         self.rng = np.random.default_rng(seed)
 
@@ -405,13 +405,13 @@ class IRTransport:
         )
         self.mass_ref = get_mass_distribution(self.df_ref, self.seq_cols)
         self.mass_samp = get_mass_distribution(self.df_samp, self.seq_cols)
-        self.distance_matrix = (
-            self.distance_func(
-                self.df_ref[self.seq_cols].to_numpy(),
-                self.df_samp[self.seq_cols].to_numpy(),
-            )
-            / self.max_distance
+
+        distance_matrix = self.distance_func(
+            self.df_ref[self.seq_cols].to_numpy(),
+            self.df_samp[self.seq_cols].to_numpy(),
         )
+        self.max_distance = np.max(distance_matrix)
+        self.distance_matrix = distance_matrix / self.max_distance
 
         self.effort_matrix = compute_effort_matrix(
             self.mass_ref, self.mass_samp, self.distance_matrix, self.lambd, **kwargs
@@ -522,7 +522,7 @@ class IRTransport:
                 .with_row_index()
                 .group_by(self.common_cols)
                 .agg(
-                    sample=func(pl.col("multiplicity").sum(), dtype=pl.Int8),
+                    sample=func(pl.col("multiplicity").sum(), dtype=pl.UInt32),
                     index=pl.col("index").first(),
                 )
                 .explode("sample")
@@ -584,13 +584,12 @@ class IRTransport:
                     self.neighbor_radius,
                 )
 
-                distance_matrix = (
-                    self.distance_func(
-                        df_ref_trial[self.seq_cols].to_numpy(),
-                        df_samp_trial[self.seq_cols].to_numpy(),
-                    )
-                    / self.max_distance
+                distance_matrix = self.distance_func(
+                    df_ref_trial[self.seq_cols].to_numpy(),
+                    df_samp_trial[self.seq_cols].to_numpy(),
                 )
+                max_distance = np.max(distance_matrix)
+                distance_matrix = distance_matrix / max_distance
 
                 effort_matrix = compute_effort_matrix(
                     mass_ref_trial, mass_samp_trial, distance_matrix, self.lambd
@@ -600,7 +599,7 @@ class IRTransport:
                     df_samp_trial,
                     effort_matrix,
                     samp_trial_neighbor_map,
-                    max_distance=self.max_distance,
+                    max_distance=max_distance,
                 )
 
                 # Keep only those sequences which appeared in the true sample dataset.
@@ -631,7 +630,7 @@ class IRTransport:
                     df_ref_trial,
                     effort_matrix,
                     ref_trial_neighbor_map,
-                    max_distance=self.max_distance,
+                    max_distance=max_distance,
                     axis=1,
                 )
                 ref_trial_joined = self.df_ref.join(
@@ -721,11 +720,17 @@ class IRTransport:
         )
 
         self.df_samp = estimate_significance(df_samp_rand)
+        assert all(self.df_samp["scores"].list.len().unique() == min_sample_size), (
+            "Scores are not all equal length"
+        )
 
         if not compute_reference_significance:
             return self.df_samp
 
         self.df_ref = estimate_significance(df_ref_rand)
+        assert all(self.df_ref["scores"].list.len().unique() == min_sample_size), (
+            "Scores are not all equal length"
+        )
 
         return self.df_samp, self.df_ref
 
@@ -891,7 +896,8 @@ class IRTransport:
             df[self.seq_cols].to_numpy(),
         ).ravel()
 
-        radii = np.arange(0, self.max_distance + step, step)
+        radii = np.arange(0, self.max_cluster_distance + step, step)
+
         # Determine which sequences belong to which annulus.
         annulus_searchsort = np.searchsorted(radii, distance_vec, "left")
 
@@ -929,6 +935,7 @@ class IRTransport:
                 ),
             )
         )
+
         slm = SegmentedLinearModel(
             tmp["annulus_radius"],
             tmp["mean_annulus_enrichment"],

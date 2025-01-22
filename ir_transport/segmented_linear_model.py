@@ -1,9 +1,14 @@
+from __future__ import annotations
+
 from typing import *
+from typing import TYPE_CHECKING
 
 import numpy as np
-from numpy.typing import NDArray
 from scipy.optimize import minimize_scalar
 from scipy.special import factorial, stdtr
+
+if TYPE_CHECKING:
+    from numpy.typing import NDArray
 
 
 def preprocess_input(
@@ -29,7 +34,8 @@ def preprocess_input(
     y = np.asarray(y)
 
     if len(x) != len(y):
-        raise RuntimeError("x and y must have the same length.")
+        msg = "x and y must have the same length."
+        raise RuntimeError(msg)
 
     mask_finite = np.isfinite(x) & np.isfinite(y)
     return x[mask_finite], y[mask_finite]
@@ -306,9 +312,7 @@ def search_min(
 
 
 class SegmentedLinearModel:
-    """
-    Class to fit piecewise linear models by inferring breakpoints.
-    """
+    """Class to fit piecewise linear models by inferring breakpoints."""
 
     def __init__(
         self,
@@ -332,6 +336,10 @@ class SegmentedLinearModel:
             The seed for the random number generator.
         """
         self.x, self.y = preprocess_input(x, y)
+        if len(self.x) == 1:
+            msg = "SegmentedLinearModel cannot be initialized. Only one datapoint is given"
+            raise RuntimeError(msg)
+
         self.x_min = self.x.min()
         self.x_max = self.x.max()
         self.lower_breakpoint_bound = self.x[0] + (self.x[1] - self.x[0]) / 2
@@ -401,26 +409,30 @@ class SegmentedLinearModel:
             x_min = x.min()
             x_max = x.max()
         elif x is not None and y is None:
-            raise RuntimeError("If x is given, y must be given too.")
+            msg = "If x is given, y must be given too."
+            raise RuntimeError(msg)
         else:
-            raise RuntimeError("If y is given, x must be given too.")
+            msg = "If y is given, x must be given too."
+            raise RuntimeError(msg)
 
         breakpoint_min = np.min(breakpoints)
         breakpoint_max = np.max(breakpoints)
         if breakpoint_min <= x_min:
-            raise RuntimeError(
+            msg = (
                 "Breakpoint analysis failed. The minimum breakpoint "
                 f"({breakpoint_min}) is at or below the minimum x "
                 f"({x_min}). Ensure that the minimum initial guess is in "
                 "(x_min, x_max)."
             )
+            raise RuntimeError(msg)
         if breakpoint_max >= x_max:
-            raise RuntimeError(
+            msg = (
                 "Breakpoint analysis failed. The maximum breakpoint "
                 f"({breakpoint_min:.3g}) is at or beyond the maximum  x "
                 f"({x_max:.3g}). Ensure that the minimum initial guess is in "
                 "(x_min, x_max)."
             )
+            raise RuntimeError(msg)
 
         num_breakpoints = len(breakpoints)
         ones = np.ones_like(x)
@@ -444,11 +456,12 @@ class SegmentedLinearModel:
             indicator_params = sol[2 + num_breakpoints :]
 
             if np.isclose(0, sol[2:]).any():
-                raise RuntimeError(
+                msg = (
                     "At least one segmented linear model parameter is close to 0. "
                     "Are too many breakpoints being estimated? Is there enough "
                     "evidence for breakpoints in the data?"
                 )
+                raise RuntimeError(msg)
             delta = indicator_params / max0_params
 
             new_breakpoints = breakpoints - h * delta
@@ -570,18 +583,23 @@ class SegmentedLinearModel:
             [1, 0, 1, 0],
         ):
             if int(arg) != arg:
-                raise TypeError(f"{arg_label} must be an integer.")
+                msg = f"{arg_label} must be an integer."
+                raise TypeError(msg)
             if arg < lowest_val:
-                raise ValueError(f"{arg_label} must be >= {lowest_val}.")
+                msg = f"{arg_label} must be >= {lowest_val}."
+                raise ValueError(msg)
 
         if tol <= 0:
-            raise ValueError("tol must be > 0.")
+            msg = "tol must be > 0."
+            raise ValueError(msg)
 
         if early_stopping is not None:
             if int(early_stopping) != early_stopping:
-                raise TypeError("early_stopping must be an integer")
+                msg = "early_stopping must be an integer"
+                raise TypeError(msg)
             if early_stopping <= 0:
-                raise ValueError("early_stopping must be >= 0.")
+                msg = "early_stopping must be >= 0."
+                raise ValueError(msg)
         else:
             early_stopping = np.inf
 
@@ -611,12 +629,12 @@ class SegmentedLinearModel:
                     )
                 )
             else:
-                raise ValueError(
-                    "init_breakpoints must be 'quantile', 'range', or 'random'."
-                )
+                msg = "init_breakpoints must be 'quantile', 'range', or 'random'."
+                raise ValueError(msg)
 
         if self.len_data <= 2 + 2 * num_breakpoints:
-            raise RuntimeError("Breakpoint analysis failed. Too few datapoints.")
+            msg = "Breakpoint analysis failed. Too few datapoints."
+            raise RuntimeError(msg)
 
         self.davies_x, self.davies_p = compute_davies(self.x, self.y, num_davies)
 

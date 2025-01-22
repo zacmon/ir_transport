@@ -3,7 +3,7 @@ error rate or the false discovery rate.
 """
 
 import warnings
-from typing import Any, Dict, Tuple
+from typing import Any
 
 import numpy as np
 from numpy.typing import NDArray
@@ -48,8 +48,8 @@ def estimate_fraction_null(
     lambdas: NDArray[np.float64] = np.arange(0.05, 1, 0.05),
     estimate_method: str = "smoother",
     log_transform: bool = False,
-    **kwargs: Dict[str, Any],
-) -> Tuple[np.float64, NDArray[np.float64], NDArray[np.float64], UnivariateSpline]:
+    **kwargs: dict[str, Any],
+) -> tuple[np.float64, NDArray[np.float64], NDArray[np.float64], UnivariateSpline]:
     """
     Estimate the overall proportion of null p values.
 
@@ -98,10 +98,11 @@ def estimate_fraction_null(
            https://doi.org/10.1111/j.1467-9868.2004.00439.x
     """
     if estimate_method != "smoother" and estimate_method != "boostrap":
-        raise ValueError(
+        msg = (
             f"{estimate_method} is an invalid option. estimate_method must be "
             "either 'smoother' or 'boostrap'."
         )
+        raise ValueError(msg)
 
     num_tests = len(pvalues)
 
@@ -111,20 +112,23 @@ def estimate_fraction_null(
     else:
         len_lambdas = len(lambdas)
         if len_lambdas > 1 and len_lambdas < 4:
-            raise RuntimeError(
+            msg = (
                 f"The amount of lambdas is {len_lambdas}. Either "
                 "one lambda is used or lambdas should have at least "
                 "four values."
             )
+            raise RuntimeError(msg)
 
     if np.any((lambdas < 0) | (lambdas >= 1)):
-        raise ValueError("lambdas must be in [0, 1).")
+        msg = "lambdas must be in [0, 1)."
+        raise ValueError(msg)
 
     if np.max(pvalues) < np.max(lambdas):
-        raise RuntimeError(
+        msg = (
             "The maximum p value is smaller than the lambda range. "
             "Change the range of lambda."
         )
+        raise RuntimeError(msg)
 
     if len_lambdas == 1:
         spline = None
@@ -157,7 +161,8 @@ def estimate_fraction_null(
         warnings.warn(
             "The estimated probability of null p values <= 0. This "
             "estimate is being set to 1. Check that the p values are "
-            "in [0, 1] or use a different range of lambdas."
+            "in [0, 1] or use a different range of lambdas.",
+            stacklevel=2,
         )
         pi0_hat = 1
 
@@ -172,7 +177,7 @@ def get_adjusted_pvalues(
     lambdas: NDArray[np.floating] = np.arange(0.05, 1, 0.05),
     estimate_method: str = "smoother",
     log_transform: bool = False,
-    **kwargs: Dict[str, Any],
+    **kwargs: dict[str, Any],
 ) -> NDArray[np.floating]:
     """
     Adjust p values using multiple testing corrections.
@@ -264,33 +269,37 @@ def get_adjusted_pvalues(
     """
     if method not in METHODS:
         to_print = ", ".join(METHODS)
-        raise ValueError(
+        msg = (
             f"{method} is an invalid method. Available methods: "
             f"{to_print}. See documentation for further information."
         )
+        raise ValueError(msg)
 
     pvalues = np.asarray(pvalues)
 
     gt_1 = pvalues > 1
     if np.any(gt_1):
         num_gt_1 = np.count_nonzero(gt_1)
-        raise RuntimeError(
+        msg = (
             f"There are {num_gt_1} erroneous p values greater "
             "than 1. p values must be in [0, 1]."
         )
+        raise RuntimeError(msg)
 
     lt_0 = pvalues < 0
     if np.any(lt_0):
         num_lt_0 = np.count_nonzero(lt_0)
-        raise RuntimeError(
+        msg = (
             f"There are {num_lt_0} erroneous p values less than "
             "0. p values must be in [0, 1]."
         )
+        raise RuntimeError(msg)
 
     nan_check = np.isnan(pvalues)
     if np.any(nan_check):
         num_nan = np.count_nonzero(nan_check)
-        raise RuntimeError(f"There are {num_nan} erroneous p values which are nan.")
+        msg = f"There are {num_nan} erroneous p values which are nan."
+        raise RuntimeError(msg)
 
     method = method.lower()
     num_tests = len(pvalues)
@@ -303,7 +312,8 @@ def get_adjusted_pvalues(
 
     elif method == "empirical_null":
         if null_pvalues is None:
-            raise RuntimeError("empirical_null cannot be used if null_pvalues is None.")
+            msg = "empirical_null cannot be used if null_pvalues is None."
+            raise RuntimeError(msg)
         null_pvalues = np.asarray(null_pvalues)
 
         if estimate_method == "smoother":
@@ -332,7 +342,7 @@ def get_adjusted_pvalues(
                 )
             )
             argsort = np.argsort(concat_pvalues)
-            pvalues_ascend = concat_pvalues[argsort]
+            concat_pvalues[argsort]
             signal_labels_ascend = signal_labels[argsort]
             sig_discovery = signal_labels_ascend.cumsum()
             bkgd_discovery = (~signal_labels_ascend).cumsum()
@@ -341,11 +351,12 @@ def get_adjusted_pvalues(
             p_adj_unsrt[argsort] = p_adj
             return p_adj_unsrt[:num_tests]
         else:
-            raise ValueError(
+            msg = (
                 f"{estimate_method} is an invalid option. "
                 "estimate_method must be either 'smoother' or "
                 "'empirical' when method is 'empirical_null'."
             )
+            raise ValueError(msg)
 
     arange = np.arange(1, num_tests + 1)
 
@@ -398,7 +409,8 @@ def get_adjusted_pvalues(
                 )[0]
             else:
                 if fraction_null <= 0 or fraction_null > 1:
-                    raise ValueError("fraction_null must be in (0, 1].")
+                    msg = "fraction_null must be in (0, 1]."
+                    raise ValueError(msg)
             to_min_acc = num_tests / arange * fraction_null * p_desc
             p_adj = np.minimum.accumulate(to_min_acc)
 
